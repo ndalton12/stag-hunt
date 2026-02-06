@@ -1,0 +1,16 @@
+[project]
+name = "stag-hunt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "ndalton12", email = "niall.dalton12@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "flashlite[evals]>=0.2.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
