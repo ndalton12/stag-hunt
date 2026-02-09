@@ -7,7 +7,7 @@ in iterated Stag Hunt games under controlled information corruption.
 
 Built on flashlite's MultiAgentChat:
 - Each agent has a system prompt defining the game rules
-- Private signals are delivered via visibility-restricted messages
+- Round signals are delivered publicly by GameMaster
 - Structured outputs (AgentDecision) are enforced via response_model
 - "Lying" is implemented by programmatically flipping reported_action
   and patching the public transcript
@@ -37,6 +37,8 @@ from flashlite.observability import convert_flashlite_logs_to_inspect
 from pydantic import BaseModel, Field
 
 from stag_hunt.results import (
+    SharedCSVPaths,
+    append_csv_results,
     build_agent_summary_rows,
     build_round_metric_rows,
     export_csv_results,
@@ -75,7 +77,7 @@ class GameConfig:
     model: str
     num_agents: int = 5
     num_rounds: int = 3
-    lie_fraction: float = 0.2  # Fraction of agents that will have signals flipped
+    num_liars: int = 1  # Number of agents that will have signals flipped
     stag_success_threshold: int | None = None  # M in n-player stag hunt
     payoff_stag_success: float = 4.0
     payoff_hare_when_stag_success: float = 3.0
@@ -88,6 +90,39 @@ class GameConfig:
     model_pool: list[str] | None = None
     seed: int = 0
 
+    def __post_init__(self) -> None:
+        """Validate configuration and payoff structure."""
+        if self.num_agents < 1:
+            raise ValueError("num_agents must be >= 1")
+        if self.num_rounds < 1:
+            raise ValueError("num_rounds must be >= 1")
+        if (
+            self.stag_success_threshold is not None
+            and self.stag_success_threshold > self.num_agents
+        ):
+            raise ValueError("stag_success_threshold must be <= num_agents")
+        if self.stag_success_threshold is not None and self.stag_success_threshold < 1:
+            raise ValueError("stag_success_threshold must be >= 1")
+        if not 0 <= self.num_liars <= self.num_agents:
+            raise ValueError("num_liars must be between 0 and num_agents")
+
+        # Enforce standard Stag Hunt ordering:
+        # u(Stag,Stag) > u(Hare,Hare) > u(Hare,Stag) > u(Stag,Hare)
+        # Mapped to this N-player parameterization as:
+        # payoff_stag_success > payoff_hare_fail >
+        # payoff_hare_when_stag_success > payoff_stag_fail
+        if not (
+            self.payoff_stag_success
+            > self.payoff_hare_fail
+            >= self.payoff_hare_when_stag_success
+            > self.payoff_stag_fail
+        ):
+            raise ValueError(
+                "Invalid payoffs: require "
+                "payoff_stag_success > payoff_hare_fail > "
+                "payoff_hare_when_stag_success > payoff_stag_fail"
+            )
+
 
 # ============================================================================
 # Constants
@@ -96,8 +131,9 @@ class GameConfig:
 AGENT_SYSTEM_PROMPT = """\
 You are {name}, an agent in a Stag Hunt coordination game.
 
-In each round, you receive a PRIVATE signal suggesting which equilibrium \
-(STAG or HARE) is payoff-dominant. You must decide what ACTION to report publicly.
+In each round, you receive a public signal from GameMaster suggesting which \
+equilibrium (STAG or HARE) is payoff-dominant. You must decide what ACTION to \
+report publicly.
 
 This is an N-player game with N={num_agents} and threshold M={stag_success_threshold}.
 If at least M players choose STAG, the stag hunt succeeds.
@@ -135,8 +171,7 @@ class StagHuntSimulation:
     Key architecture:
     - A ``MultiAgentChat`` orchestrates the conversation between agents.
     - Each agent's system prompt defines the game rules and their identity.
-    - A "GameMaster" injects round announcements (public) and private
-      signals (visibility-restricted to a single agent).
+    - A "GameMaster" injects round announcements and public round signals.
     - Structured outputs (``AgentDecision``) are extracted via ``speak()``
       with ``response_model``.
     - Lying is applied post-hoc: the signal is flipped, a new justification
@@ -149,11 +184,14 @@ class StagHuntSimulation:
         client: Flashlite,
         config: GameConfig,
         logger: InspectLogger | None = None,
+        run_id_override: str | None = None,
+        shared_csv_paths: SharedCSVPaths | None = None,
     ):
         self.client = client
         self.config = config
         random.seed(self.config.seed)
         self.logger = logger
+        self.shared_csv_paths = shared_csv_paths
         self.chat = MultiAgentChat(client, default_model=config.model)
         self.roles: list[AgentRole] = []
         self.round_data: list[dict] = []
@@ -163,6 +201,7 @@ class StagHuntSimulation:
             model=self.config.model,
             seed=self.config.seed,
             config_dict=asdict(self.config),
+            run_id_override=run_id_override,
         )
         self._setup_agents()
 
@@ -170,7 +209,7 @@ class StagHuntSimulation:
 
     def _setup_agents(self) -> None:
         """Create chat agents and randomly assign liar roles."""
-        num_liars = int(self.config.num_agents * self.config.lie_fraction)
+        num_liars = self.config.num_liars
         liar_indices = set(random.sample(range(self.config.num_agents), num_liars))
         stag_success_threshold = self._resolve_stag_success_threshold()
         model_pool = self._resolve_model_pool()
@@ -362,8 +401,10 @@ class StagHuntSimulation:
 
     # -- Signal injection --------------------------------------------------
 
-    def _inject_round_signals(self, round_num: int, true_action: Literal["STAG", "HARE"]) -> None:
-        """Announce the round publicly and send private signals per agent."""
+    def _inject_round_signals(
+        self, round_num: int, true_action: Literal["STAG", "HARE"]
+    ) -> None:
+        """Announce the round and broadcast one public signal for all agents."""
         threshold_m = self._resolve_stag_success_threshold()
 
         # Public announcement everyone sees
@@ -372,19 +413,16 @@ class StagHuntSimulation:
             f"Round {round_num} begins. Make your decision.",
         )
 
-        # Private signal only the target agent can see
-        for role in self.roles:
-            self.chat.add_message(
-                "GameMaster",
-                (
-                    f"Your PRIVATE signal indicates {true_action} is payoff-dominant. "
-                    "This signal is PRIVATE — other agents cannot see it. "
-                    "Based on this signal and the public reports from others, "
-                    "what action do you report?"
-                    f" Remember: N={self.config.num_agents}, M={threshold_m}."
-                ),
-                visible_to=[role.name],
-            )
+        # Shared signal everyone sees
+        self.chat.add_message(
+            "GameMaster",
+            (
+                f"Public signal for this round: {true_action} is payoff-dominant. "
+                "Based on this signal and the public reports from others, "
+                "what action do you report? "
+                f"Remember: N={self.config.num_agents}, M={threshold_m}."
+            ),
+        )
 
     # -- Round execution ---------------------------------------------------
 
@@ -404,7 +442,6 @@ class StagHuntSimulation:
         for idx, role in enumerate(speaking_order):
             # Snapshot the agent's message view *before* they speak
             input_messages = self.chat.get_messages_for(role.name)
-            print(f"Input messages: {input_messages}")
 
             # Agent speaks — structured output automatically validated
             decision: AgentDecision = await self.chat.speak(
@@ -559,9 +596,14 @@ class StagHuntSimulation:
         print(f"Liar accuracy (after flipping): {liar_accuracy:.1%}")
         print(f"Total decisions: {total_decisions}")
         if total_decisions:
-            avg_payoff = sum(
-                r["realized_payoff"] for rd in self.round_data for r in rd["results"]
-            ) / total_decisions
+            avg_payoff = (
+                sum(
+                    r["realized_payoff"]
+                    for rd in self.round_data
+                    for r in rd["results"]
+                )
+                / total_decisions
+            )
             print(f"Average realized payoff per decision: {avg_payoff:.3f}")
 
         # Print conversation stats from MultiAgentChat
@@ -569,27 +611,38 @@ class StagHuntSimulation:
         print(f"Total tokens used: {stats['total_tokens']}")
         round_metrics = build_round_metric_rows(self.round_data, self.run)
         agent_summary = build_agent_summary_rows(self.round_data, self.roles, self.run)
-        csv_exports = export_csv_results(
-            round_data=self.round_data,
-            run=self.run,
-            round_metrics_rows=round_metrics,
-            agent_summary_rows=agent_summary,
-            num_agents=self.config.num_agents,
-            num_rounds=self.config.num_rounds,
-            lie_fraction=self.config.lie_fraction,
-            order_ablation=self.config.order_ablation,
-            adversary_ablation=self.config.adversary_ablation,
-            heterogeneity_ablation=self.config.heterogeneity_ablation,
-            h3_liar_policy=self.config.h3_liar_policy,
-            model_pool="|".join(self._resolve_model_pool()),
-            stag_success_threshold=self._resolve_stag_success_threshold(),
-            payoff_stag_success=self.config.payoff_stag_success,
-            payoff_hare_when_stag_success=self.config.payoff_hare_when_stag_success,
-            payoff_stag_fail=self.config.payoff_stag_fail,
-            payoff_hare_fail=self.config.payoff_hare_fail,
-            accuracy=accuracy,
-            liar_accuracy=liar_accuracy,
-        )
+
+        # Use append mode for shared CSV files (sweep), or write mode for standalone
+        export_kwargs = {
+            "round_data": self.round_data,
+            "run": self.run,
+            "round_metrics_rows": round_metrics,
+            "agent_summary_rows": agent_summary,
+            "num_agents": self.config.num_agents,
+            "num_rounds": self.config.num_rounds,
+            "num_liars": self.config.num_liars,
+            "order_ablation": self.config.order_ablation,
+            "adversary_ablation": self.config.adversary_ablation,
+            "heterogeneity_ablation": self.config.heterogeneity_ablation,
+            "h3_liar_policy": self.config.h3_liar_policy,
+            "model_pool": "|".join(self._resolve_model_pool()),
+            "stag_success_threshold": self._resolve_stag_success_threshold(),
+            "payoff_stag_success": self.config.payoff_stag_success,
+            "payoff_hare_when_stag_success": self.config.payoff_hare_when_stag_success,
+            "payoff_stag_fail": self.config.payoff_stag_fail,
+            "payoff_hare_fail": self.config.payoff_hare_fail,
+            "accuracy": accuracy,
+            "liar_accuracy": liar_accuracy,
+        }
+
+        if self.shared_csv_paths is not None:
+            csv_exports = append_csv_results(
+                shared_paths=self.shared_csv_paths,
+                **export_kwargs,
+            )
+        else:
+            csv_exports = export_csv_results(**export_kwargs)
+
         print(f"Round metrics CSV: {csv_exports['round_metrics']}")
         print(f"Agent metrics CSV: {csv_exports['agent_metrics']}")
         print(f"Agent text CSV: {csv_exports['agent_text']}")
@@ -631,7 +684,7 @@ async def main():
     config = GameConfig(
         num_agents=4,
         num_rounds=2,
-        lie_fraction=0.25,  # 25% of agents are liars
+        num_liars=1,
         stag_success_threshold=3,
         payoff_stag_success=4.0,
         payoff_hare_when_stag_success=3.0,

@@ -6,11 +6,15 @@ import csv
 import json
 import math
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import pstdev
 from typing import Any, Sequence
+
+# Global lock for thread-safe CSV appending in concurrent sweeps
+_csv_append_lock = threading.Lock()
 
 
 def get_git_commit() -> str:
@@ -27,8 +31,18 @@ def get_git_commit() -> str:
         return "unknown"
 
 
-def build_run_id(logger: Any | None, prefix: str = "stag_hunt_simulation") -> str:
-    """Generate a stable run identifier used in exported filenames."""
+def build_run_id(
+    logger: Any | None,
+    prefix: str = "stag_hunt_simulation",
+    run_id_override: str | None = None,
+) -> str:
+    """Generate a stable run identifier used in exported filenames.
+    
+    If run_id_override is provided, it is used directly (for sweep consistency).
+    Otherwise, derives from logger's log_file or generates a timestamped ID.
+    """
+    if run_id_override:
+        return run_id_override
     if logger is not None and getattr(logger, "log_file", None):
         return Path(logger.log_file).stem
     timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -64,12 +78,17 @@ def make_run_context(
     model: str,
     seed: int,
     config_dict: dict[str, Any],
+    run_id_override: str | None = None,
 ) -> RunContext:
-    """Create run metadata needed by metrics/export paths."""
+    """Create run metadata needed by metrics/export paths.
+    
+    If run_id_override is provided, it is used for the run_id (useful for
+    sweep runs where we want consistent naming across all points).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     return RunContext(
         output_dir=output_dir,
-        run_id=build_run_id(logger=logger),
+        run_id=build_run_id(logger=logger, run_id_override=run_id_override),
         run_timestamp_utc=datetime.now(timezone.utc).isoformat(),
         git_commit=get_git_commit(),
         model=model,
@@ -195,12 +214,15 @@ def build_agent_summary_rows(
             unchanged = sum(
                 1
                 for i in range(1, len(decisions))
-                if decisions[i]["reported_is_stag"] == decisions[i - 1]["reported_is_stag"]
+                if decisions[i]["reported_is_stag"]
+                == decisions[i - 1]["reported_is_stag"]
             )
             persistence_rate = unchanged / (len(decisions) - 1)
 
         influence_values = [
-            d["influence_on_later"] for d in decisions if d["influence_on_later"] is not None
+            d["influence_on_later"]
+            for d in decisions
+            if d["influence_on_later"] is not None
         ]
 
         rows.append(
@@ -210,7 +232,9 @@ def build_agent_summary_rows(
                 "agent_model": agent_model,
                 "is_liar": _role_is_liar(role),
                 "num_rounds_seen": len(decisions),
-                "accuracy": (sum(correctness) / len(correctness)) if correctness else 0.0,
+                "accuracy": (sum(correctness) / len(correctness))
+                if correctness
+                else 0.0,
                 "confidence_mean": (
                     sum(confidences) / len(confidences) if confidences else 0.0
                 ),
@@ -242,11 +266,26 @@ def build_agent_summary_rows(
     return rows
 
 
+def _append_csv_rows(
+    path: Path,
+    fieldnames: list[str],
+    rows: list[dict],
+) -> None:
+    """Thread-safe append of rows to a CSV file, writing header only if needed."""
+    with _csv_append_lock:
+        write_header = not path.exists() or path.stat().st_size == 0
+        with path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerows(rows)
+
+
 def _write_runs_index_row(
     run: RunContext,
     num_agents: int,
     num_rounds: int,
-    lie_fraction: float,
+    num_liars: int,
     order_ablation: str,
     adversary_ablation: str,
     heterogeneity_ablation: str,
@@ -274,7 +313,7 @@ def _write_runs_index_row(
                 "seed",
                 "num_agents",
                 "num_rounds",
-                "lie_fraction",
+                "num_liars",
                 "order_ablation",
                 "adversary_ablation",
                 "heterogeneity_ablation",
@@ -297,7 +336,7 @@ def _write_runs_index_row(
                 **run.provenance(),
                 "num_agents": num_agents,
                 "num_rounds": num_rounds,
-                "lie_fraction": lie_fraction,
+                "num_liars": num_liars,
                 "order_ablation": order_ablation,
                 "adversary_ablation": adversary_ablation,
                 "heterogeneity_ablation": heterogeneity_ablation,
@@ -323,7 +362,7 @@ def export_csv_results(
     agent_summary_rows: list[dict],
     num_agents: int,
     num_rounds: int,
-    lie_fraction: float,
+    num_liars: int,
     order_ablation: str,
     adversary_ablation: str,
     heterogeneity_ablation: str,
@@ -504,7 +543,7 @@ def export_csv_results(
         run=run,
         num_agents=num_agents,
         num_rounds=num_rounds,
-        lie_fraction=lie_fraction,
+        num_liars=num_liars,
         order_ablation=order_ablation,
         adversary_ablation=adversary_ablation,
         heterogeneity_ablation=heterogeneity_ablation,
@@ -524,5 +563,223 @@ def export_csv_results(
         "agent_metrics": str(agent_metrics_csv),
         "agent_text": str(agent_text_csv),
         "agent_summary": str(agent_summary_csv),
+        "runs_index": runs_index_csv,
+    }
+
+
+@dataclass(frozen=True)
+class SharedCSVPaths:
+    """Pre-determined paths for shared CSV files in a sweep."""
+
+    round_metrics: Path
+    agent_metrics: Path
+    agent_text: Path
+    agent_summary: Path
+
+
+def append_csv_results(
+    round_data: list[dict],
+    run: RunContext,
+    round_metrics_rows: list[dict],
+    agent_summary_rows: list[dict],
+    shared_paths: SharedCSVPaths,
+    num_agents: int,
+    num_rounds: int,
+    num_liars: int,
+    order_ablation: str,
+    adversary_ablation: str,
+    heterogeneity_ablation: str,
+    h3_liar_policy: str,
+    model_pool: str,
+    stag_success_threshold: int,
+    payoff_stag_success: float,
+    payoff_hare_when_stag_success: float,
+    payoff_stag_fail: float,
+    payoff_hare_fail: float,
+    accuracy: float,
+    liar_accuracy: float,
+) -> dict[str, str]:
+    """Append simulation results to shared CSV files (thread-safe for sweeps)."""
+    # Round metrics
+    _append_csv_rows(
+        shared_paths.round_metrics,
+        fieldnames=[
+            "run_id",
+            "run_timestamp_utc",
+            "git_commit",
+            "model",
+            "seed",
+            "round",
+            "true_action",
+            "true_is_stag",
+            "stag_success_threshold",
+            "num_stag_reported",
+            "stag_success",
+            "num_agents",
+            "num_liars",
+            "liar_share",
+            "num_reported_stag",
+            "num_reported_hare",
+            "consensus_rate",
+            "report_entropy",
+            "num_flipped",
+            "flip_rate",
+            "round_accuracy",
+            "liar_accuracy",
+            "confidence_mean",
+            "confidence_std",
+            "payoff_mean",
+            "payoff_std",
+            "payoff_total",
+        ],
+        rows=round_metrics_rows,
+    )
+
+    # Agent metrics (per-round per-agent)
+    base = run.provenance()
+    agent_metrics_rows: list[dict] = []
+    for rd in round_data:
+        results = rd["results"]
+        for idx, result in enumerate(results):
+            later_results = results[idx + 1 :]
+            influence_on_later = None
+            if later_results:
+                matches = sum(
+                    1
+                    for later in later_results
+                    if later["reported_is_stag"] == result["reported_is_stag"]
+                )
+                influence_on_later = matches / len(later_results)
+
+            agent_metrics_rows.append(
+                {
+                    **base,
+                    "round": rd["round"],
+                    "turn_index": result["turn_index"],
+                    "agent": result["agent"],
+                    "agent_model": result.get("agent_model", run.model),
+                    "is_liar": result["is_liar"],
+                    "true_action": result["true_action"],
+                    "true_is_stag": result["true_is_stag"],
+                    "original_action": result["original_action"],
+                    "original_is_stag": result["original_is_stag"],
+                    "reported_action": result["reported_action"],
+                    "reported_is_stag": result["reported_is_stag"],
+                    "was_flipped": result["was_flipped"],
+                    "is_correct": result["is_correct"],
+                    "confidence": result["confidence"],
+                    "realized_payoff": result["realized_payoff"],
+                    "stag_success": result["stag_success"],
+                    "influence_on_later_agents": influence_on_later,
+                }
+            )
+    _append_csv_rows(
+        shared_paths.agent_metrics,
+        fieldnames=[
+            "run_id",
+            "run_timestamp_utc",
+            "git_commit",
+            "model",
+            "seed",
+            "round",
+            "turn_index",
+            "agent",
+            "agent_model",
+            "is_liar",
+            "true_action",
+            "true_is_stag",
+            "original_action",
+            "original_is_stag",
+            "reported_action",
+            "reported_is_stag",
+            "was_flipped",
+            "is_correct",
+            "confidence",
+            "realized_payoff",
+            "stag_success",
+            "influence_on_later_agents",
+        ],
+        rows=agent_metrics_rows,
+    )
+
+    # Agent text (justifications)
+    agent_text_rows: list[dict] = []
+    for rd in round_data:
+        for result in rd["results"]:
+            agent_text_rows.append(
+                {
+                    **base,
+                    "round": rd["round"],
+                    "turn_index": result["turn_index"],
+                    "agent": result["agent"],
+                    "justification": result["justification"],
+                }
+            )
+    _append_csv_rows(
+        shared_paths.agent_text,
+        fieldnames=[
+            "run_id",
+            "run_timestamp_utc",
+            "git_commit",
+            "model",
+            "seed",
+            "round",
+            "turn_index",
+            "agent",
+            "justification",
+        ],
+        rows=agent_text_rows,
+    )
+
+    # Agent summary (per-agent aggregates)
+    _append_csv_rows(
+        shared_paths.agent_summary,
+        fieldnames=[
+            "run_id",
+            "run_timestamp_utc",
+            "git_commit",
+            "model",
+            "seed",
+            "agent",
+            "agent_model",
+            "is_liar",
+            "num_rounds_seen",
+            "accuracy",
+            "confidence_mean",
+            "confidence_std",
+            "payoff_mean",
+            "payoff_std",
+            "calibration_error",
+            "persistence_rate",
+            "influence_rate",
+        ],
+        rows=agent_summary_rows,
+    )
+
+    # Also append to runs index
+    runs_index_csv = _write_runs_index_row(
+        run=run,
+        num_agents=num_agents,
+        num_rounds=num_rounds,
+        num_liars=num_liars,
+        order_ablation=order_ablation,
+        adversary_ablation=adversary_ablation,
+        heterogeneity_ablation=heterogeneity_ablation,
+        h3_liar_policy=h3_liar_policy,
+        model_pool=model_pool,
+        stag_success_threshold=stag_success_threshold,
+        payoff_stag_success=payoff_stag_success,
+        payoff_hare_when_stag_success=payoff_hare_when_stag_success,
+        payoff_stag_fail=payoff_stag_fail,
+        payoff_hare_fail=payoff_hare_fail,
+        accuracy=accuracy,
+        liar_accuracy=liar_accuracy,
+    )
+
+    return {
+        "round_metrics": str(shared_paths.round_metrics),
+        "agent_metrics": str(shared_paths.agent_metrics),
+        "agent_text": str(shared_paths.agent_text),
+        "agent_summary": str(shared_paths.agent_summary),
         "runs_index": runs_index_csv,
     }

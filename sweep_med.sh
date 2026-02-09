@@ -1,0 +1,14 @@
+uv run python -m stag_hunt.sweep_sim \
+  --models openai/gpt-5-mini \
+  --agent-configs "3,0;3,1;3,2;5,0;5,1;5,2;5,3;8,0;8,2;8,4" \
+  --num-rounds 1,2,4 \
+  --stag-thresholds 2,3,4,5,8 \
+  --payoffs "4.0,2.0,0.0,2.0" \
+  --ablations a1,a2,a3,b3,h1,h2,h3 \
+  --ablation-subset-runs 8 \
+  --model-pool openai/gpt-5-mini,openai/gpt-5-nano \
+  --h3-liar-policy weakest_liars \
+  --replicates 3 \
+  --seed-start 1337 \
+  --max-concurrency 50 \
+  --eval-prefix stag_hunt_simulation_med
