@@ -1,16 +1,17 @@
 uv run python -m stag_hunt.sweep_sim \
-  --models openai/gpt-5-mini,openai/gpt-5.2-2025-12-11,cerebras/glm-4.7 \
+  --models openai/gpt-5-mini,openai/gpt-5.2-2025-12-11,cerebras/llama-3.1-8b \
   --agent-configs "2,0;2,1;3,1;3,2;5,1;5,2;5,3;5,4" \
   --num-rounds 1,2,4 \
   --stag-thresholds 1,2,3,4 \
   --payoffs "4.0,2.0,0.0,2.0" \
   --ablations a1,a2,a3,b3,h1,h2,h3 \
   --ablation-subset-runs 10 \
-  --model-pool openai/gpt-5-mini,openai/gpt-5-nano,openai/gpt-5.2-2025-12-11,cerebras/glm-4.7,cerebras/llama-3.1-8b \
+  --model-pool openai/gpt-5-mini,openai/gpt-5-nano,openai/gpt-5.2-2025-12-11,cerebras/llama-3.1-8b \
   --h3-liar-policy weakest_liars \
   --replicates 1 \
   --seed-start 1337 \
-  --max-concurrency 50 \
+  --max-concurrency 10 \
   --eval-prefix stag_hunt_simulation_med \
-  --rpm 3000 \
-  --tpm 1000000
+  --rpm 100 \
+  --tpm 1000000 \
+  --sweep-id stag_hunt_simulation_med_20260223_172355_83707093

@@ -131,9 +131,8 @@ class GameConfig:
 AGENT_SYSTEM_PROMPT = """\
 You are {name}, an agent in a Stag Hunt coordination game.
 
-In each round, you receive a public signal from GameMaster suggesting which \
-equilibrium (STAG or HARE) is payoff-dominant. You must decide what ACTION to \
-report publicly.
+In each round, you must decide whether to choose STAG or HARE. \
+You can observe the public reports of other agents who have already spoken.
 
 This is an N-player game with N={num_agents} and threshold M={stag_success_threshold}.
 If at least M players choose STAG, the stag hunt succeeds.
@@ -401,40 +400,28 @@ class StagHuntSimulation:
 
     # -- Signal injection --------------------------------------------------
 
-    def _inject_round_signals(
-        self, round_num: int, true_action: Literal["STAG", "HARE"]
-    ) -> None:
-        """Announce the round and broadcast one public signal for all agents."""
+    def _inject_round_signals(self, round_num: int) -> None:
+        """Announce the round start. Agents decide autonomously — no signal is given."""
         threshold_m = self._resolve_stag_success_threshold()
 
-        # Public announcement everyone sees
-        self.chat.add_message(
-            "GameMaster",
-            f"Round {round_num} begins. Make your decision.",
-        )
-
-        # Shared signal everyone sees
         self.chat.add_message(
             "GameMaster",
             (
-                f"Public signal for this round: {true_action} is payoff-dominant. "
-                "Based on this signal and the public reports from others, "
-                "what action do you report? "
+                f"Round {round_num} begins. Based on the public reports from others, "
+                "what action do you choose? "
                 f"Remember: N={self.config.num_agents}, M={threshold_m}."
             ),
         )
 
     # -- Round execution ---------------------------------------------------
 
-    async def run_round(
-        self, round_num: int, true_action: Literal["STAG", "HARE"]
-    ) -> list[dict]:
-        """Run a single round: inject signals, collect decisions, apply lying."""
+    async def run_round(self, round_num: int) -> list[dict]:
+        """Run a single round: announce round, collect decisions, apply lying."""
         print(f"\n{'=' * 60}")
-        print(f"ROUND {round_num} — True action signal: {true_action}")
+        print(f"ROUND {round_num}")
         print("=" * 60)
 
-        self._inject_round_signals(round_num, true_action)
+        self._inject_round_signals(round_num)
 
         round_results: list[dict] = []
 
@@ -472,14 +459,11 @@ class StagHuntSimulation:
                 "round": round_num,
                 "turn_index": idx,
                 "is_liar": role.is_liar,
-                "true_action": true_action,
-                "true_is_stag": true_action == "STAG",
                 "original_action": decision.reported_action,
                 "original_is_stag": decision.reported_action == "STAG",
                 "reported_action": public_decision.reported_action,
                 "reported_is_stag": public_decision.reported_action == "STAG",
                 "was_flipped": was_flipped,
-                "is_correct": public_decision.reported_action == true_action,
                 "confidence": public_decision.confidence,
                 "justification": public_decision.justification,
             }
@@ -514,12 +498,13 @@ class StagHuntSimulation:
             result["stag_success"] = stag_success
             result["stag_success_threshold"] = threshold_m
             result["num_stag_reported"] = num_stag
+            # Correct = agent chose the dominant action given the outcome:
+            # STAG when stag succeeded, or HARE when stag failed.
+            result["is_correct"] = result["reported_is_stag"] == stag_success
 
         self.round_data.append(
             {
                 "round": round_num,
-                "true_action": true_action,
-                "true_is_stag": true_action == "STAG",
                 "stag_success_threshold": threshold_m,
                 "num_stag_reported": num_stag,
                 "stag_success": stag_success,
@@ -559,10 +544,7 @@ class StagHuntSimulation:
             print(f"Designated liars: {', '.join(self.liar_names)}")
 
         for round_num in range(1, self.config.num_rounds + 1):
-            true_action: Literal["STAG", "HARE"] = (
-                "STAG" if round_num % 2 == 1 else "HARE"
-            )
-            await self.run_round(round_num, true_action)
+            await self.run_round(round_num)
 
         return self._analyze_results()
 
@@ -592,8 +574,8 @@ class StagHuntSimulation:
         accuracy = total_correct / total_decisions if total_decisions else 0
         liar_accuracy = liar_correct / liar_total if liar_total else 0
 
-        print(f"Overall accuracy (public reports match truth): {accuracy:.1%}")
-        print(f"Liar accuracy (after flipping): {liar_accuracy:.1%}")
+        print(f"Overall accuracy (chose dominant action): {accuracy:.1%}")
+        print(f"Liar accuracy (chose dominant action): {liar_accuracy:.1%}")
         print(f"Total decisions: {total_decisions}")
         if total_decisions:
             avg_payoff = (
@@ -669,7 +651,7 @@ class StagHuntSimulation:
 async def main():
     """Run the Stag Hunt simulation."""
     client = Flashlite(
-        default_model="openai/gpt-5-nano",
+        default_model="openai/gpt-5-mini",
         template_dir=PROMPTS_DIR,
         track_costs=True,
         rate_limit=RateLimitConfig(requests_per_minute=30, tokens_per_minute=20000),
@@ -683,17 +665,17 @@ async def main():
 
     config = GameConfig(
         num_agents=4,
-        num_rounds=2,
-        num_liars=1,
-        stag_success_threshold=3,
+        num_rounds=3,
+        num_liars=2,
+        stag_success_threshold=2,
         payoff_stag_success=4.0,
-        payoff_hare_when_stag_success=3.0,
+        payoff_hare_when_stag_success=2.0,
         payoff_stag_fail=0.0,
         payoff_hare_fail=2.0,
         order_ablation="a1",
         adversary_ablation="base",
         heterogeneity_ablation="h1",
-        model="openai/gpt-5-nano",
+        model="openai/gpt-5-mini",
     )
 
     try:
