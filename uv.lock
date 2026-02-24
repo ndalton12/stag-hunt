@@ -1728,10 +1728,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "flashlite", extra = ["evals"] },
+    { name = "huggingface-hub" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "flashlite", extras = ["evals"], specifier = ">=0.2.2" }]
+requires-dist = [
+    { name = "flashlite", extras = ["evals"], specifier = ">=0.2.2" },
+    { name = "huggingface-hub", specifier = ">=1.4.0" },
+]
 
 [[package]]
 name = "tenacity"
