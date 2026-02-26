@@ -156,12 +156,27 @@ def load_sweep_data(logs_dir: str | Path) -> SweepData:
         0, float("nan")
     )
 
-    # Enrich agent tables with run-level parameters (include stag_success_threshold)
+    # Enrich agent and round tables with run-level parameters and ablation codes
     run_params = runs[
-        ["run_id", "num_agents", "num_liars", "num_rounds", "stag_success_threshold"]
+        [
+            "run_id",
+            "num_agents",
+            "num_liars",
+            "num_rounds",
+            "stag_success_threshold",
+            "order_ablation",
+            "adversary_ablation",
+            "heterogeneity_ablation",
+        ]
     ].drop_duplicates()
     agent_summary = agent_summary.merge(run_params, on="run_id", how="left")
     agent_metrics = agent_metrics.merge(run_params, on="run_id", how="left")
+    _ablation_cols = ["order_ablation", "adversary_ablation", "heterogeneity_ablation"]
+    _merge_cols = ["run_id"] + [c for c in _ablation_cols if c not in round_metrics.columns]
+    if len(_merge_cols) > 1:
+        round_metrics = round_metrics.merge(
+            run_params[_merge_cols].drop_duplicates(), on="run_id", how="left",
+        )
 
     for df in (agent_metrics, agent_summary):
         if "liar_share" not in df.columns:
@@ -1002,6 +1017,138 @@ def fig_confidence_dynamics(data: SweepData) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
+# Shared ablation figure helper
+# ---------------------------------------------------------------------------
+
+_ORDER_ABLATION_LABELS = {"a1": "A1: fixed", "a2": "A2: random", "a3": "A3: reversed"}
+_ADVERSARY_ABLATION_LABELS = {"base": "Base: flip", "b3": "B3: random noise"}
+_HETEROGENEITY_ABLATION_LABELS = {"h1": "H1: homogeneous", "h2": "H2: mixed", "h3": "H3: adversarial"}
+_ABLATION_PALETTE = "Set1"
+
+
+_PARAM_POINT_COLS = [
+    "model",
+    "num_agents",
+    "num_liars",
+    "num_rounds",
+    "stag_success_threshold",
+]
+
+
+def _ablation_coordination_figure(
+    data: SweepData,
+    ablation_col: str,
+    ablation_labels: dict[str, str],
+    title_suffix: str,
+) -> plt.Figure:
+    """Bar + strip plot comparing stag-success rate across ablation variants.
+
+    Shared implementation for order / adversary / heterogeneity ablation figures.
+
+    Because ablation runs typically cover a small subset of parameter points,
+    we restrict to parameter points that have data for *every* ablation
+    variant, ensuring an apples-to-apples comparison.  Each dot is one run's
+    mean stag-success rate; bars show the overall mean with 95% CI.
+    """
+    rm = data.round_metrics.copy()
+    if ablation_col not in rm.columns:
+        return _empty_fig(f"No {ablation_col} column found")
+
+    rm = rm.dropna(subset=[ablation_col])
+    variants = sorted(rm[ablation_col].unique())
+    if len(variants) < 2:
+        return _empty_fig(f"Only one {ablation_col} value found — nothing to compare")
+
+    rm["_ablation_label"] = rm[ablation_col].map(ablation_labels).fillna(rm[ablation_col])
+    label_order = [ablation_labels.get(v, v) for v in variants]
+
+    # Aggregate per run
+    group_cols = ["run_id", "_ablation_label", "liar_share"] + [
+        c for c in _PARAM_POINT_COLS if c in rm.columns
+    ]
+    run_agg = (
+        rm.groupby(group_cols)
+        .agg(stag_success_rate=("stag_success", "mean"))
+        .reset_index()
+    )
+
+    # Build a parameter-point key and keep only points present in ALL variants
+    pp_cols = [c for c in _PARAM_POINT_COLS if c in run_agg.columns]
+    run_agg["_pp_key"] = run_agg[pp_cols].astype(str).agg("|".join, axis=1)
+    keys_per_variant = run_agg.groupby("_ablation_label")["_pp_key"].apply(set)
+    common_keys = set.intersection(*keys_per_variant)
+    if not common_keys:
+        return _empty_fig(f"No shared parameter points across {ablation_col} variants")
+    run_agg = run_agg[run_agg["_pp_key"].isin(common_keys)]
+
+    fig, ax = plt.subplots(figsize=_FIG_SINGLE)
+    sns.barplot(
+        data=run_agg,
+        x="_ablation_label",
+        order=label_order,
+        y="stag_success_rate",
+        hue="_ablation_label",
+        hue_order=label_order,
+        palette=_ABLATION_PALETTE,
+        errorbar=("ci", 95),
+        legend=False,
+        ax=ax,
+    )
+    sns.stripplot(
+        data=run_agg,
+        x="_ablation_label",
+        order=label_order,
+        y="stag_success_rate",
+        color="0.25",
+        size=4,
+        alpha=0.5,
+        jitter=True,
+        ax=ax,
+    )
+    ax.set_xlabel(title_suffix)
+    ax.set_ylabel("Stag success rate")
+    ax.set_ylim(-0.05, 1.05)
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 12 – Order ablation comparison (a1 vs a2 vs a3)
+# ---------------------------------------------------------------------------
+
+
+def fig_order_ablation(data: SweepData) -> plt.Figure:
+    """Coordination rate vs liar fraction, comparing speaking-order variants."""
+    return _ablation_coordination_figure(
+        data, "order_ablation", _ORDER_ABLATION_LABELS, "Speaking order",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Figure 13 – Adversary ablation (base vs b3)
+# ---------------------------------------------------------------------------
+
+
+def fig_adversary_ablation(data: SweepData) -> plt.Figure:
+    """Coordination rate vs liar fraction, comparing adversary strategies."""
+    return _ablation_coordination_figure(
+        data, "adversary_ablation", _ADVERSARY_ABLATION_LABELS, "Adversary type",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Figure 14 – Heterogeneity ablation (h1 vs h2 vs h3)
+# ---------------------------------------------------------------------------
+
+
+def fig_heterogeneity_ablation(data: SweepData) -> plt.Figure:
+    """Coordination rate vs liar fraction, comparing model-composition strategies."""
+    return _ablation_coordination_figure(
+        data, "heterogeneity_ablation", _HETEROGENEITY_ABLATION_LABELS, "Model composition",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Figure registry & generation
 # ---------------------------------------------------------------------------
 
@@ -1049,6 +1196,18 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
     "fig11_confidence_dynamics": (
         "Confidence Dynamics Over Rounds",
         fig_confidence_dynamics,
+    ),
+    "fig12_order_ablation": (
+        "Order Ablation (A1 vs A2 vs A3)",
+        fig_order_ablation,
+    ),
+    "fig13_adversary_ablation": (
+        "Adversary Ablation (Base vs B3)",
+        fig_adversary_ablation,
+    ),
+    "fig14_heterogeneity_ablation": (
+        "Heterogeneity Ablation (H1 vs H2 vs H3)",
+        fig_heterogeneity_ablation,
     ),
 }
 

@@ -10,6 +10,9 @@ requires-python = ">=3.13"
 dependencies = [
     "flashlite[evals]>=0.2.2",
     "huggingface-hub>=1.4.0",
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.1",
+    "seaborn>=0.13.2",
 ]
 
 [build-system]
