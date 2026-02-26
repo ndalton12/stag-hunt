@@ -172,10 +172,14 @@ def load_sweep_data(logs_dir: str | Path) -> SweepData:
     agent_summary = agent_summary.merge(run_params, on="run_id", how="left")
     agent_metrics = agent_metrics.merge(run_params, on="run_id", how="left")
     _ablation_cols = ["order_ablation", "adversary_ablation", "heterogeneity_ablation"]
-    _merge_cols = ["run_id"] + [c for c in _ablation_cols if c not in round_metrics.columns]
+    _merge_cols = ["run_id"] + [
+        c for c in _ablation_cols if c not in round_metrics.columns
+    ]
     if len(_merge_cols) > 1:
         round_metrics = round_metrics.merge(
-            run_params[_merge_cols].drop_duplicates(), on="run_id", how="left",
+            run_params[_merge_cols].drop_duplicates(),
+            on="run_id",
+            how="left",
         )
 
     for df in (agent_metrics, agent_summary):
@@ -276,7 +280,12 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
 
     models = _sorted_models(run_agg)
     agent_counts = sorted(run_agg["num_agents"].unique())
-    thresholds = sorted(run_agg["stag_success_threshold"].unique())
+    # Drop M=1 threshold rows — success is trivially near-1.0 when only
+    # one agent needs to choose stag, making the row uninformative.
+    all_thresholds = sorted(run_agg["stag_success_threshold"].unique())
+    thresholds = [t for t in all_thresholds if t > 1]
+    if not thresholds:
+        thresholds = all_thresholds  # fallback: keep everything
 
     n_rows, n_cols = len(thresholds), len(agent_counts)
     fig, axes = plt.subplots(
@@ -345,51 +354,62 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
 
 
 def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
-    """Line plot of honest-agent accuracy over rounds, by liar fraction, faceted by model."""
+    """Honest-agent accuracy and confidence over rounds, faceted by model.
+
+    Top row = accuracy, bottom row = confidence.  Hue = liar-fraction bin
+    (quartile) so the CI bands stay readable.
+    """
     rm = _multi_round_filter(data.round_metrics)
     if rm.empty:
         return _empty_fig("No multi-round runs found")
 
     models = _sorted_models(rm)
-    liar_labels = _sorted_liar_labels(rm)
+    bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
 
+    metrics = [
+        ("honest_accuracy", "Honest-agent accuracy"),
+        ("confidence_mean", "Mean confidence"),
+    ]
+    n_rows = len(metrics)
+    n_cols = len(models)
     fig, axes = plt.subplots(
-        1,
-        len(models),
-        figsize=_FIG_WIDE,
-        sharey=True,
+        n_rows,
+        n_cols,
+        figsize=(5 * n_cols, 4 * n_rows),
+        sharey="row",
         squeeze=False,
     )
 
-    for col, model in enumerate(models):
-        ax = axes[0, col]
-        subset = rm[rm["model_short"] == model]
-        sns.lineplot(
-            data=subset,
-            x="round",
-            y="honest_accuracy",
-            hue="liar_share_label",
-            hue_order=liar_labels,
-            marker="o",
-            palette=_LIAR_SHARE_PALETTE,
-            errorbar=("ci", 95),
-            ax=ax,
-        )
-        ax.text(
-            0.05,
-            0.05,
-            model,
-            transform=ax.transAxes,
-            fontsize=8,
-            va="bottom",
-            color="0.4",
-        )
-        ax.set_xlabel("Round")
-        ax.set_ylabel("Honest-agent accuracy" if col == 0 else "")
-        ax.set_ylim(-0.05, 1.05)
-        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-        if ax.get_legend():
-            ax.get_legend().remove()
+    for row, (metric_col, metric_label) in enumerate(metrics):
+        for col, model in enumerate(models):
+            ax = axes[row, col]
+            subset = rm[rm["model_short"] == model]
+            sns.lineplot(
+                data=subset,
+                x="round",
+                y=metric_col,
+                hue="liar_share_bin",
+                hue_order=bin_order,
+                marker="o",
+                palette=_LIAR_SHARE_PALETTE,
+                errorbar=("ci", 95),
+                ax=ax,
+            )
+            ax.text(
+                0.05,
+                0.05,
+                model,
+                transform=ax.transAxes,
+                fontsize=8,
+                va="bottom",
+                color="0.4",
+            )
+            ax.set_xlabel("Round" if row == n_rows - 1 else "")
+            ax.set_ylabel(metric_label if col == 0 else "")
+            ax.set_ylim(-0.05, 1.05)
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+            if ax.get_legend():
+                ax.get_legend().remove()
 
     _add_figure_legend(
         fig,
@@ -674,14 +694,14 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
     """Consensus rate and entropy over rounds.
 
     Rows = stag_success_threshold, columns = metric (consensus | entropy).
-    Hue = liar fraction.
+    Hue = liar-fraction bin (quartile).
     """
     rm = _multi_round_filter(data.round_metrics)
     if rm.empty:
         return _empty_fig("No multi-round runs found")
 
     thresholds = sorted(rm["stag_success_threshold"].unique())
-    liar_labels = _sorted_liar_labels(rm)
+    bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
     metrics = [
         ("consensus_rate", "Consensus rate"),
         ("report_entropy", "Entropy (bits)"),
@@ -703,8 +723,8 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
                 data=subset,
                 x="round",
                 y=metric_col,
-                hue="liar_share_label",
-                hue_order=liar_labels,
+                hue="liar_share_bin",
+                hue_order=bin_order,
                 marker="o",
                 palette=_LIAR_SHARE_PALETTE,
                 errorbar=("ci", 95),
@@ -953,76 +973,16 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Figure 11 – Confidence dynamics over rounds
-# ---------------------------------------------------------------------------
-
-
-def fig_confidence_dynamics(data: SweepData) -> plt.Figure:
-    """Line plot of mean confidence over rounds, by liar fraction, faceted by model."""
-    rm = _multi_round_filter(data.round_metrics)
-    if rm.empty:
-        return _empty_fig("No multi-round runs found")
-
-    models = _sorted_models(rm)
-    liar_labels = _sorted_liar_labels(rm)
-
-    fig, axes = plt.subplots(
-        1,
-        len(models),
-        figsize=_FIG_WIDE,
-        sharey=True,
-        squeeze=False,
-    )
-
-    for col, model in enumerate(models):
-        ax = axes[0, col]
-        subset = rm[rm["model_short"] == model]
-        sns.lineplot(
-            data=subset,
-            x="round",
-            y="confidence_mean",
-            hue="liar_share_label",
-            hue_order=liar_labels,
-            marker="o",
-            palette=_LIAR_SHARE_PALETTE,
-            errorbar=("ci", 68),
-            ax=ax,
-        )
-        ax.text(
-            0.05,
-            0.05,
-            model,
-            transform=ax.transAxes,
-            fontsize=8,
-            va="bottom",
-            color="0.4",
-        )
-        ax.set_xlabel("Round")
-        ax.set_ylabel("Mean confidence" if col == 0 else "")
-        ax.set_ylim(-0.05, 1.05)
-        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-        if ax.get_legend():
-            ax.get_legend().remove()
-
-    _add_figure_legend(
-        fig,
-        axes[0, 0],
-        title="Liar fraction",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
-    )
-    fig.tight_layout()
-    return fig
-
-
-# ---------------------------------------------------------------------------
 # Shared ablation figure helper
 # ---------------------------------------------------------------------------
 
 _ORDER_ABLATION_LABELS = {"a1": "A1: fixed", "a2": "A2: random", "a3": "A3: reversed"}
 _ADVERSARY_ABLATION_LABELS = {"base": "Base: flip", "b3": "B3: random noise"}
-_HETEROGENEITY_ABLATION_LABELS = {"h1": "H1: homogeneous", "h2": "H2: mixed", "h3": "H3: adversarial"}
+_HETEROGENEITY_ABLATION_LABELS = {
+    "h1": "H1: homogeneous",
+    "h2": "H2: mixed",
+    "h3": "H3: adversarial",
+}
 _ABLATION_PALETTE = "Set1"
 
 
@@ -1059,7 +1019,9 @@ def _ablation_coordination_figure(
     if len(variants) < 2:
         return _empty_fig(f"Only one {ablation_col} value found — nothing to compare")
 
-    rm["_ablation_label"] = rm[ablation_col].map(ablation_labels).fillna(rm[ablation_col])
+    rm["_ablation_label"] = (
+        rm[ablation_col].map(ablation_labels).fillna(rm[ablation_col])
+    )
     label_order = [ablation_labels.get(v, v) for v in variants]
 
     # Aggregate per run
@@ -1120,7 +1082,10 @@ def _ablation_coordination_figure(
 def fig_order_ablation(data: SweepData) -> plt.Figure:
     """Coordination rate vs liar fraction, comparing speaking-order variants."""
     return _ablation_coordination_figure(
-        data, "order_ablation", _ORDER_ABLATION_LABELS, "Speaking order",
+        data,
+        "order_ablation",
+        _ORDER_ABLATION_LABELS,
+        "Speaking order",
     )
 
 
@@ -1132,7 +1097,10 @@ def fig_order_ablation(data: SweepData) -> plt.Figure:
 def fig_adversary_ablation(data: SweepData) -> plt.Figure:
     """Coordination rate vs liar fraction, comparing adversary strategies."""
     return _ablation_coordination_figure(
-        data, "adversary_ablation", _ADVERSARY_ABLATION_LABELS, "Adversary type",
+        data,
+        "adversary_ablation",
+        _ADVERSARY_ABLATION_LABELS,
+        "Adversary type",
     )
 
 
@@ -1144,7 +1112,10 @@ def fig_adversary_ablation(data: SweepData) -> plt.Figure:
 def fig_heterogeneity_ablation(data: SweepData) -> plt.Figure:
     """Coordination rate vs liar fraction, comparing model-composition strategies."""
     return _ablation_coordination_figure(
-        data, "heterogeneity_ablation", _HETEROGENEITY_ABLATION_LABELS, "Model composition",
+        data,
+        "heterogeneity_ablation",
+        _HETEROGENEITY_ABLATION_LABELS,
+        "Model composition",
     )
 
 
@@ -1157,8 +1128,8 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         "Coordination Success vs. Liar Fraction",
         fig_coordination_vs_liar_share,
     ),
-    "fig2_accuracy_trajectory": (
-        "Honest-Agent Accuracy Trajectory Over Rounds",
+    "fig2_accuracy_confidence": (
+        "Honest-Agent Accuracy & Confidence Over Rounds",
         fig_accuracy_over_rounds,
     ),
     "fig3_calibration": (
@@ -1192,10 +1163,6 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
     "fig10_turn_order": (
         "Turn-Order Effects (A1: Fixed Order)",
         fig_turn_order_effects,
-    ),
-    "fig11_confidence_dynamics": (
-        "Confidence Dynamics Over Rounds",
-        fig_confidence_dynamics,
     ),
     "fig12_order_ablation": (
         "Order Ablation (A1 vs A2 vs A3)",
