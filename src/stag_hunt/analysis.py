@@ -12,11 +12,13 @@ Usage (CLI)::
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -251,6 +253,36 @@ def _add_figure_legend(fig: plt.Figure, ax: plt.Axes, **kwargs) -> None:
     fig.legend(handles, labels, **kwargs)
 
 
+def _lineplot_with_errorbars(
+    *,
+    ax: plt.Axes,
+    data: pd.DataFrame,
+    x: str,
+    y: str,
+    hue: str,
+    hue_order: list[str],
+    palette: str | dict[str, str],
+    errorbar: tuple[str, int],
+    sort: bool = True,
+) -> None:
+    """Consistent lineplot styling with error bars instead of filled bands."""
+    sns.lineplot(
+        data=data,
+        x=x,
+        y=y,
+        hue=hue,
+        hue_order=hue_order,
+        marker="o",
+        linewidth=1.8,
+        palette=palette,
+        errorbar=errorbar,
+        err_style="bars",
+        err_kws={"capsize": 2, "elinewidth": 1},
+        sort=sort,
+        ax=ax,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Figure 1 – Coordination success rate vs. liar fraction
 # ---------------------------------------------------------------------------
@@ -279,7 +311,7 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
     )
 
     models = _sorted_models(run_agg)
-    agent_counts = sorted(run_agg["num_agents"].unique())
+    liar_labels = [_fmt_liar_share(x) for x in sorted(run_agg["liar_share"].unique())]
     # Drop M=1 threshold rows — success is trivially near-1.0 when only
     # one agent needs to choose stag, making the row uninformative.
     all_thresholds = sorted(run_agg["stag_success_threshold"].unique())
@@ -287,7 +319,20 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
     if not thresholds:
         thresholds = all_thresholds  # fallback: keep everything
 
-    n_rows, n_cols = len(thresholds), len(agent_counts)
+    pairs = sorted(
+        {
+            (int(n_agents), int(threshold))
+            for n_agents, threshold in run_agg[
+                ["num_agents", "stag_success_threshold"]
+            ].itertuples(index=False, name=None)
+            if threshold in thresholds
+        }
+    )
+    if not pairs:
+        return _empty_fig("No non-trivial coordination settings found")
+
+    n_cols = min(3, len(pairs))
+    n_rows = math.ceil(len(pairs) / n_cols)
     fig, axes = plt.subplots(
         n_rows,
         n_cols,
@@ -295,47 +340,49 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
         sharey=True,
         squeeze=False,
     )
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(pairs) :]:
+        ax.set_visible(False)
 
-    for row, threshold in enumerate(thresholds):
-        for col, n_agents in enumerate(agent_counts):
-            ax = axes[row, col]
-            subset = run_agg[
-                (run_agg["num_agents"] == n_agents)
-                & (run_agg["stag_success_threshold"] == threshold)
-            ]
-            if subset.empty:
-                ax.set_visible(False)
-                continue
-            sns.lineplot(
-                data=subset,
-                x="liar_share",
-                y="stag_success_rate",
-                hue="model_short",
-                hue_order=models,
-                marker="o",
-                palette=_MODEL_PALETTE,
-                errorbar=("ci", 95),
-                ax=ax,
-            )
-            ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
-            ax.set_ylabel("Stag success rate" if col == 0 else "")
-            ax.set_ylim(-0.05, 1.05)
-            ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
-            ax.text(
-                0.05,
-                0.05,
-                f"N={n_agents}, M={threshold}",
-                transform=ax.transAxes,
-                fontsize=8,
-                va="bottom",
-                color="0.4",
-            )
-            if ax.get_legend():
-                ax.get_legend().remove()
+    visible_axes: list[plt.Axes] = []
+    for idx, (n_agents, threshold) in enumerate(pairs):
+        ax = flat_axes[idx]
+        subset = run_agg[
+            (run_agg["num_agents"] == n_agents)
+            & (run_agg["stag_success_threshold"] == threshold)
+        ].copy()
+        if subset.empty:
+            ax.set_visible(False)
+            continue
+        subset["liar_share_label"] = pd.Categorical(
+            subset["liar_share"].apply(_fmt_liar_share),
+            categories=liar_labels,
+            ordered=True,
+        )
+        subset = subset.sort_values("liar_share")
 
-    first_visible = next(
-        ax for row_axes in axes for ax in row_axes if ax.get_visible() and ax.lines
-    )
+        _lineplot_with_errorbars(
+            ax=ax,
+            data=subset,
+            x="liar_share_label",
+            y="stag_success_rate",
+            hue="model_short",
+            hue_order=models,
+            palette=_MODEL_PALETTE,
+            errorbar=("ci", 95),
+            sort=False,
+        )
+        row, col = divmod(idx, n_cols)
+        ax.set_title(f"N={n_agents}, M={threshold}", fontsize=10)
+        ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
+        ax.set_ylabel("Stag success rate" if col == 0 else "")
+        ax.set_ylim(-0.05, 1.05)
+        ax.tick_params(axis="x", rotation=0)
+        if ax.get_legend():
+            ax.get_legend().remove()
+        visible_axes.append(ax)
+
+    first_visible = visible_axes[0]
     _add_figure_legend(
         fig,
         first_visible,
@@ -384,16 +431,15 @@ def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
         for col, model in enumerate(models):
             ax = axes[row, col]
             subset = rm[rm["model_short"] == model]
-            sns.lineplot(
+            _lineplot_with_errorbars(
+                ax=ax,
                 data=subset,
                 x="round",
                 y=metric_col,
                 hue="liar_share_bin",
                 hue_order=bin_order,
-                marker="o",
                 palette=_LIAR_SHARE_PALETTE,
                 errorbar=("ci", 95),
-                ax=ax,
             )
             ax.text(
                 0.05,
@@ -429,11 +475,33 @@ def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
 
 
 def fig_confidence_calibration(data: SweepData) -> plt.Figure:
-    """Scatter of per-agent confidence vs. accuracy, split by role.
-
-    Two panels (Honest | Liar), colored by model, with calibration diagonal.
-    """
+    """Reliability-style calibration plot (binned confidence vs. accuracy)."""
     ags = data.agent_summary.dropna(subset=["confidence_mean", "accuracy"])
+    if ags.empty:
+        return _empty_fig("No calibration data found")
+
+    ags = ags.copy()
+    ags["confidence_mean"] = ags["confidence_mean"].clip(0, 1)
+    ags["accuracy"] = ags["accuracy"].clip(0, 1)
+    # Equal-width bins tame overplotting in the raw discrete scatter.
+    bin_edges = np.linspace(0, 1, 9)
+    ags["confidence_bin"] = pd.cut(
+        ags["confidence_mean"],
+        bins=bin_edges,
+        include_lowest=True,
+        duplicates="drop",
+    )
+
+    cal = (
+        ags.groupby(["role", "model_short", "confidence_bin"], observed=False)
+        .agg(
+            mean_confidence=("confidence_mean", "mean"),
+            mean_accuracy=("accuracy", "mean"),
+            n=("accuracy", "size"),
+        )
+        .reset_index()
+        .dropna(subset=["mean_confidence", "mean_accuracy"])
+    )
     role_order = ["Honest", "Liar"]
 
     fig, axes = plt.subplots(
@@ -451,23 +519,35 @@ def fig_confidence_calibration(data: SweepData) -> plt.Figure:
 
     for col, role in enumerate(role_order):
         ax = axes[0, col]
-        subset = ags[ags["role"] == role]
+        subset = cal[cal["role"] == role]
 
         for model in models:
             msub = subset[subset["model_short"] == model]
-            ax.scatter(
-                msub["confidence_mean"],
-                msub["accuracy"],
+            if msub.empty:
+                continue
+            msub = msub.sort_values("mean_confidence")
+            ax.plot(
+                msub["mean_confidence"],
+                msub["mean_accuracy"],
                 label=model,
                 color=model_colors[model],
-                alpha=0.4,
-                edgecolors="none",
-                s=25,
+                linewidth=1.8,
+                marker="o",
+                markersize=4,
+            )
+            ax.scatter(
+                msub["mean_confidence"],
+                msub["mean_accuracy"],
+                color=model_colors[model],
+                edgecolors="white",
+                linewidths=0.4,
+                alpha=0.9,
+                s=20 + 2 * msub["n"].clip(upper=40),
             )
 
         ax.plot([0, 1], [0, 1], "k--", alpha=0.35, linewidth=1)
-        ax.set_xlabel("Mean confidence")
-        ax.set_ylabel("Accuracy" if col == 0 else "")
+        ax.set_xlabel("Binned mean confidence")
+        ax.set_ylabel("Empirical accuracy" if col == 0 else "")
         ax.set_xlim(-0.05, 1.05)
         ax.set_ylim(-0.05, 1.05)
         ax.set_aspect("equal")
@@ -480,6 +560,15 @@ def fig_confidence_calibration(data: SweepData) -> plt.Figure:
             va="top",
             fontweight="bold",
             color=_ROLE_COLORS[role],
+        )
+        ax.text(
+            0.05,
+            0.06,
+            "Point size ~ bin count",
+            transform=ax.transAxes,
+            fontsize=8,
+            va="bottom",
+            color="0.45",
         )
 
     _add_figure_legend(
