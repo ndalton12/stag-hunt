@@ -2,7 +2,7 @@
 
 Reads sweep-level CSVs produced by ``sweep_sim.py`` and generates a suite of
 publication-ready figures exploring coordination, accuracy, calibration,
-influence, payoffs, and strategic persistence under adversarial deception.
+influence, and payoffs under adversarial deception.
 
 Usage (CLI)::
 
@@ -311,13 +311,10 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
     )
 
     models = _sorted_models(run_agg)
-    liar_labels = [_fmt_liar_share(x) for x in sorted(run_agg["liar_share"].unique())]
     # Drop M=1 threshold rows — success is trivially near-1.0 when only
     # one agent needs to choose stag, making the row uninformative.
     all_thresholds = sorted(run_agg["stag_success_threshold"].unique())
-    thresholds = [t for t in all_thresholds if t > 1]
-    if not thresholds:
-        thresholds = all_thresholds  # fallback: keep everything
+    thresholds = all_thresholds  # fallback: keep everything
 
     pairs = sorted(
         {
@@ -354,17 +351,13 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
         if subset.empty:
             ax.set_visible(False)
             continue
-        subset["liar_share_label"] = pd.Categorical(
-            subset["liar_share"].apply(_fmt_liar_share),
-            categories=liar_labels,
-            ordered=True,
-        )
+
         subset = subset.sort_values("liar_share")
 
         _lineplot_with_errorbars(
             ax=ax,
             data=subset,
-            x="liar_share_label",
+            x="liar_share",
             y="stag_success_rate",
             hue="model_short",
             hue_order=models,
@@ -372,12 +365,22 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
             sort=False,
         )
+
+        # Add vertical cutoff line at m/n
+        cutoff = threshold / n_agents
+        ax.axvline(
+            x=cutoff,
+            linestyle="--",
+            color="black",
+            alpha=0.6,
+        )
         row, col = divmod(idx, n_cols)
         ax.set_title(f"N={n_agents}, M={threshold}", fontsize=10)
         ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
         ax.set_ylabel("Stag success rate" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
         ax.tick_params(axis="x", rotation=0)
+        ax.xaxis.set_major_formatter(mticker.PercentFormatter(1.0))
         if ax.get_legend():
             ax.get_legend().remove()
         visible_axes.append(ax)
@@ -446,9 +449,10 @@ def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
                 0.05,
                 model,
                 transform=ax.transAxes,
-                fontsize=8,
+                fontsize=14,
+                fontweight="bold",
                 va="bottom",
-                color="0.4",
+                color="0.5",
             )
             ax.set_xlabel("Round" if row == n_rows - 1 else "")
             ax.set_ylabel(metric_label if col == 0 else "")
@@ -502,78 +506,62 @@ def fig_confidence_calibration(data: SweepData) -> plt.Figure:
         .reset_index()
         .dropna(subset=["mean_confidence", "mean_accuracy"])
     )
-    role_order = ["Honest", "Liar"]
 
-    fig, axes = plt.subplots(
+    fig, ax = plt.subplots(
         1,
-        2,
-        figsize=(9, 4),
-        sharex=True,
-        sharey=True,
-        squeeze=False,
+        1,
+        figsize=(5, 4),
     )
 
     models = _sorted_models(ags)
     palette = sns.color_palette(_MODEL_PALETTE, n_colors=len(models))
     model_colors = dict(zip(models, palette))
 
-    for col, role in enumerate(role_order):
-        ax = axes[0, col]
-        subset = cal[cal["role"] == role]
+    subset = cal[cal["role"] == "Honest"]
 
-        for model in models:
-            msub = subset[subset["model_short"] == model]
-            if msub.empty:
-                continue
-            msub = msub.sort_values("mean_confidence")
-            ax.plot(
-                msub["mean_confidence"],
-                msub["mean_accuracy"],
-                label=model,
-                color=model_colors[model],
-                linewidth=1.8,
-                marker="o",
-                markersize=4,
-            )
-            ax.scatter(
-                msub["mean_confidence"],
-                msub["mean_accuracy"],
-                color=model_colors[model],
-                edgecolors="white",
-                linewidths=0.4,
-                alpha=0.9,
-                s=20 + 2 * msub["n"].clip(upper=40),
-            )
-
-        ax.plot([0, 1], [0, 1], "k--", alpha=0.35, linewidth=1)
-        ax.set_xlabel("Binned mean confidence")
-        ax.set_ylabel("Empirical accuracy" if col == 0 else "")
-        ax.set_xlim(-0.05, 1.05)
-        ax.set_ylim(-0.05, 1.05)
-        ax.set_aspect("equal")
-        ax.text(
-            0.05,
-            0.95,
-            role,
-            transform=ax.transAxes,
-            fontsize=9,
-            va="top",
-            fontweight="bold",
-            color=_ROLE_COLORS[role],
+    for model in models:
+        msub = subset[subset["model_short"] == model]
+        if msub.empty:
+            continue
+        msub = msub.sort_values("mean_confidence")
+        ax.plot(
+            msub["mean_confidence"],
+            msub["mean_accuracy"],
+            label=model,
+            color=model_colors[model],
+            linewidth=1.8,
+            marker="o",
+            markersize=4,
         )
-        ax.text(
-            0.05,
-            0.06,
-            "Point size ~ bin count",
-            transform=ax.transAxes,
-            fontsize=8,
-            va="bottom",
-            color="0.45",
+        ax.scatter(
+            msub["mean_confidence"],
+            msub["mean_accuracy"],
+            color=model_colors[model],
+            edgecolors="white",
+            linewidths=0.4,
+            alpha=0.9,
+            s=20 + 2 * msub["n"].clip(upper=40),
         )
 
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.35, linewidth=1)
+    ax.set_xlabel("Binned mean confidence")
+    ax.set_ylabel("Empirical accuracy")
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_aspect("equal")
+    ax.text(
+        0.05,
+        0.95,
+        "Honest",
+        transform=ax.transAxes,
+        fontsize=9,
+        va="top",
+        fontweight="bold",
+        color=_ROLE_COLORS["Honest"],
+    )
     _add_figure_legend(
         fig,
-        axes[0, 0],
+        ax,
         title="Model",
         bbox_to_anchor=(1.01, 0.5),
         loc="center left",
@@ -581,6 +569,85 @@ def fig_confidence_calibration(data: SweepData) -> plt.Figure:
     )
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 3 (replacement) – Expected calibration error table
+# ---------------------------------------------------------------------------
+
+
+def _calibration_bins_for_honest_agents(data: SweepData) -> pd.DataFrame:
+    """Return binned calibration stats for honest agents by model."""
+    ags = data.agent_summary.dropna(subset=["confidence_mean", "accuracy"]).copy()
+    if ags.empty:
+        return pd.DataFrame(
+            columns=["model_short", "confidence_bin", "mean_confidence", "mean_accuracy", "n"]
+        )
+
+    ags = ags[ags["role"] == "Honest"].copy()
+    if ags.empty:
+        return pd.DataFrame(
+            columns=["model_short", "confidence_bin", "mean_confidence", "mean_accuracy", "n"]
+        )
+
+    ags["confidence_mean"] = ags["confidence_mean"].clip(0, 1)
+    ags["accuracy"] = ags["accuracy"].clip(0, 1)
+    # Match fig_confidence_calibration binning for consistency.
+    bin_edges = np.linspace(0, 1, 9)
+    ags["confidence_bin"] = pd.cut(
+        ags["confidence_mean"],
+        bins=bin_edges,
+        include_lowest=True,
+        duplicates="drop",
+    )
+
+    return (
+        ags.groupby(["model_short", "confidence_bin"], observed=False)
+        .agg(
+            mean_confidence=("confidence_mean", "mean"),
+            mean_accuracy=("accuracy", "mean"),
+            n=("accuracy", "size"),
+        )
+        .reset_index()
+        .dropna(subset=["mean_confidence", "mean_accuracy"])
+    )
+
+
+def fig3_ece_table(data: SweepData) -> str:
+    """Return a plain-text table of expected calibration error per model."""
+    cal = _calibration_bins_for_honest_agents(data)
+    if cal.empty:
+        return "No calibration data found for honest agents.\n"
+
+    ece = (
+        cal.assign(abs_gap=(cal["mean_accuracy"] - cal["mean_confidence"]).abs())
+        .groupby("model_short", as_index=False)
+        .apply(
+            lambda g: pd.Series(
+                {
+                    "ece": np.average(g["abs_gap"], weights=g["n"]),
+                    "samples": int(g["n"].sum()),
+                    "bins_used": int((g["n"] > 0).sum()),
+                }
+            ),
+            include_groups=False,
+        )
+        .reset_index(drop=True)
+        .sort_values(["ece", "model_short"], ascending=[True, True])
+    )
+    ece["samples"] = ece["samples"].astype(int)
+    ece["bins_used"] = ece["bins_used"].astype(int)
+    ece["ece"] = ece["ece"].map(lambda x: f"{x:.4f}")
+
+    lines = [
+        "# Fig 3 — Expected Calibration Error (Honest Agents)",
+        "",
+        "Expected calibration error computed over confidence bins (8 equal-width bins on [0, 1]).",
+        "",
+        ece.to_string(index=False),
+        "",
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +682,7 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
             order=bin_order,
             y="influence_on_later_agents",
             hue="role",
+            hue_order=["Honest", "Liar"],
             palette=_ROLE_COLORS,
             errorbar=("ci", 95),
             ax=ax,
@@ -647,66 +715,96 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Figure 5 – Payoff distributions by agent role
+# Figure 5 – Honest-agent payoff table (text)
 # ---------------------------------------------------------------------------
 
 
-def fig_payoff_distributions(data: SweepData) -> plt.Figure:
-    """Bar chart of mean realized payoff +/- 95% CI by role and liar fraction."""
+def fig5_honest_payoff_table(data: SweepData) -> str:
+    """Return a plain-text table of honest-agent payoff statistics by model."""
+
     am = data.agent_metrics.copy()
+    am = am[am["role"] == "Honest"]
+    if am.empty:
+        return "No honest-agent payoff data found.\n"
+
+    summary = (
+        am.groupby(["model_short", "liar_share_label"])
+        .agg(
+            mean_payoff=("realized_payoff", "mean"),
+            std=("realized_payoff", "std"),
+            n=("realized_payoff", "size"),
+        )
+        .reset_index()
+    )
+    if summary.empty:
+        return "No honest-agent payoff data found.\n"
+
+    summary["ci95"] = 1.96 * summary["std"] / np.sqrt(summary["n"])
+    summary["model"] = summary["model_short"]
+    summary["liar_fraction"] = summary["liar_share_label"]
+    summary["mean_payoff"] = summary["mean_payoff"].round(3)
+    summary["ci95"] = summary["ci95"].round(3)
+    summary["mean_payoff_95ci"] = (
+        summary["mean_payoff"].map(lambda v: f"{v:.3f}")
+        + " +/- "
+        + summary["ci95"].map(lambda v: f"{v:.3f}")
+    )
+
     liar_labels = _sorted_liar_labels(am)
-    models = _sorted_models(am)
-
-    fig, axes = plt.subplots(
-        1,
-        len(models),
-        figsize=_FIG_WIDE,
-        sharey=True,
-        squeeze=False,
+    summary["liar_fraction"] = pd.Categorical(
+        summary["liar_fraction"],
+        categories=liar_labels,
+        ordered=True,
     )
 
-    role_order = ["Honest", "Liar"]
-    for col, model in enumerate(models):
-        ax = axes[0, col]
-        subset = am[am["model_short"] == model]
-        roles_present = [r for r in role_order if r in subset["role"].values]
-        palette = {r: _ROLE_COLORS[r] for r in roles_present}
-
-        sns.barplot(
-            data=subset,
-            x="liar_share_label",
-            order=liar_labels,
-            y="realized_payoff",
-            hue="role",
-            hue_order=roles_present,
-            palette=palette,
-            errorbar=("ci", 95),
-            ax=ax,
+    long_table = (
+        summary[
+            [
+                "model",
+                "liar_fraction",
+                "mean_payoff",
+                "ci95",
+                "n",
+                "mean_payoff_95ci",
+            ]
+        ]
+        .sort_values(["liar_fraction", "model"])
+        .rename(
+            columns={
+                "model": "Model",
+                "liar_fraction": "Liar fraction",
+                "mean_payoff": "Mean payoff",
+                "ci95": "95% CI half-width",
+                "n": "Honest-agent samples",
+                "mean_payoff_95ci": "Mean payoff (+/- 95% CI)",
+            }
         )
-        ax.text(
-            0.05,
-            0.95,
-            model,
-            transform=ax.transAxes,
-            fontsize=8,
-            va="top",
-            color="0.4",
-        )
-        ax.set_xlabel("Liar fraction")
-        ax.set_ylabel("Mean realized payoff" if col == 0 else "")
-        if ax.get_legend():
-            ax.get_legend().remove()
-
-    _add_figure_legend(
-        fig,
-        axes[0, 0],
-        title="Role",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
     )
-    fig.tight_layout()
-    return fig
+
+    wide_table = summary.pivot(
+        index="liar_fraction",
+        columns="model",
+        values="mean_payoff_95ci",
+    )
+    wide_table.index.name = "Liar fraction"
+    wide_table = wide_table.sort_index()
+
+    lines = [
+        "# Fig 5 — Honest-Agent Payoff Table",
+        "",
+        "Metric: realized payoff for honest agents only.",
+        "Reported as mean +/- 95% CI (normal approximation): mean +/- 1.96*SE.",
+        "",
+        "## Wide View (rows = liar fraction, cols = model)",
+        "",
+        wide_table.to_string(),
+        "",
+        "## Detailed View",
+        "",
+        long_table.to_string(index=False),
+        "",
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -780,38 +878,75 @@ def fig_parameter_heatmap(data: SweepData) -> plt.Figure:
 
 
 def fig_consensus_entropy(data: SweepData) -> plt.Figure:
-    """Consensus rate and entropy over rounds.
+    """Honest-agent consensus rate over rounds.
 
-    Rows = stag_success_threshold, columns = metric (consensus | entropy).
-    Hue = liar-fraction bin (quartile).
+    Rows = stag_success_threshold (M)
+    Columns = model
+    Hue = liar-fraction bin
     """
+
     rm = _multi_round_filter(data.round_metrics)
     if rm.empty:
         return _empty_fig("No multi-round runs found")
+    am = data.agent_metrics.copy()
+    am = am[am["run_id"].isin(rm["run_id"])].copy()
+    if am.empty:
+        return _empty_fig("No agent-level data found for consensus plot")
+
+    # Compute per-round consensus among honest agents only.
+    am["reported_is_stag"] = _as_bool(am["reported_is_stag"])
+    honest = am[am["role"] == "Honest"].copy()
+    if honest.empty:
+        return _empty_fig("No honest-agent data found for consensus plot")
+
+    honest_round = (
+        honest.groupby(["run_id", "round"], as_index=False)
+        .agg(
+            num_honest=("reported_is_stag", "size"),
+            num_honest_stag=("reported_is_stag", "sum"),
+        )
+    )
+    honest_round["num_honest_hare"] = (
+        honest_round["num_honest"] - honest_round["num_honest_stag"]
+    )
+    honest_round["honest_consensus_rate"] = (
+        honest_round[["num_honest_stag", "num_honest_hare"]].max(axis=1)
+        / honest_round["num_honest"]
+    )
+    rm = rm.merge(
+        honest_round[["run_id", "round", "honest_consensus_rate"]],
+        on=["run_id", "round"],
+        how="left",
+    )
 
     thresholds = sorted(rm["stag_success_threshold"].unique())
+    models = _sorted_models(rm)
     bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
-    metrics = [
-        ("consensus_rate", "Consensus rate"),
-        ("report_entropy", "Entropy (bits)"),
-    ]
 
     n_rows = len(thresholds)
+    n_cols = len(models)
+
     fig, axes = plt.subplots(
         n_rows,
-        2,
-        figsize=(10, 4 * n_rows),
+        n_cols,
+        figsize=(4 * n_cols, 3.5 * n_rows),
         squeeze=False,
+        sharey=True,
     )
 
     for row, threshold in enumerate(thresholds):
-        subset = rm[rm["stag_success_threshold"] == threshold]
-        for col, (metric_col, metric_label) in enumerate(metrics):
+        for col, model in enumerate(models):
             ax = axes[row, col]
+
+            subset = rm[
+                (rm["stag_success_threshold"] == threshold)
+                & (rm["model_short"] == model)
+            ]
+
             sns.lineplot(
-                data=subset,
+                data=subset.dropna(subset=["honest_consensus_rate"]),
                 x="round",
-                y=metric_col,
+                y="honest_consensus_rate",
                 hue="liar_share_bin",
                 hue_order=bin_order,
                 marker="o",
@@ -819,22 +954,29 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
                 errorbar=("ci", 95),
                 ax=ax,
             )
-            ax.set_xlabel("Round")
-            ax.set_ylabel(metric_label if col == 0 else "")
+
             ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-            if metric_col == "consensus_rate":
-                ax.set_ylim(-0.05, 1.05)
-            ax.text(
-                0.05,
-                0.05,
-                f"M={threshold}",
-                transform=ax.transAxes,
-                fontsize=8,
-                va="bottom",
-                color="0.4",
-            )
+            ax.set_xlabel("Round" if row == n_rows - 1 else "")
+            ax.set_ylabel("Honest-agent consensus rate" if col == 0 else "")
+            ax.set_ylim(-0.05, 1.05)
+
             if ax.get_legend():
                 ax.get_legend().remove()
+
+    # Column titles = model names
+    for col, model in enumerate(models):
+        axes[0, col].set_title(model)
+
+    # Row labels = threshold
+    for row, threshold in enumerate(thresholds):
+        axes[row, 0].annotate(
+            f"M={threshold}",
+            xy=(-0.35, 0.5),
+            xycoords="axes fraction",
+            rotation=90,
+            va="center",
+            fontsize=12,
+        )
 
     _add_figure_legend(
         fig,
@@ -844,82 +986,8 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
         loc="center left",
         frameon=True,
     )
-    fig.tight_layout()
-    return fig
 
-
-# ---------------------------------------------------------------------------
-# Figure 8 – Persistence rate by agent role
-# ---------------------------------------------------------------------------
-
-
-def fig_persistence_by_role(data: SweepData) -> plt.Figure:
-    """Bar chart of persistence rate for liars vs. honest agents.
-
-    Rows = stag_success_threshold, columns = model.
-    X-axis = liar fraction.
-    """
-    ags = data.agent_summary.dropna(subset=["persistence_rate"]).copy()
-    if ags.empty:
-        return _empty_fig("No multi-round persistence data")
-
-    models = _sorted_models(ags)
-    thresholds = sorted(ags["stag_success_threshold"].dropna().unique())
-    liar_labels = _sorted_liar_labels(ags)
-
-    n_rows, n_cols = len(thresholds), len(models)
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(5 * n_cols, 4 * n_rows),
-        sharey=True,
-        squeeze=False,
-    )
-
-    for row, threshold in enumerate(thresholds):
-        for col, model in enumerate(models):
-            ax = axes[row, col]
-            subset = ags[
-                (ags["model_short"] == model)
-                & (ags["stag_success_threshold"] == threshold)
-            ]
-            if subset.empty:
-                ax.set_visible(False)
-                continue
-            sns.barplot(
-                data=subset,
-                x="liar_share_label",
-                order=liar_labels,
-                y="persistence_rate",
-                hue="role",
-                palette=_ROLE_COLORS,
-                errorbar=("ci", 95),
-                ax=ax,
-            )
-            ax.text(
-                0.05,
-                0.95,
-                f"{model}  (M={threshold})",
-                transform=ax.transAxes,
-                fontsize=8,
-                va="top",
-                color="0.4",
-            )
-            ax.set_xlabel("Liar fraction")
-            ax.set_ylabel("Persistence rate" if col == 0 else "")
-            ax.set_ylim(0, 1.05)
-            if ax.get_legend():
-                ax.get_legend().remove()
-
-    _add_figure_legend(
-        fig,
-        axes[0, 0],
-        title="Role",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
-    )
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 0.98, 0.97])
     return fig
 
 
@@ -1111,6 +1179,7 @@ def _ablation_coordination_figure(
     rm["_ablation_label"] = (
         rm[ablation_col].map(ablation_labels).fillna(rm[ablation_col])
     )
+
     label_order = [ablation_labels.get(v, v) for v in variants]
 
     # Aggregate per run
@@ -1130,37 +1199,60 @@ def _ablation_coordination_figure(
     common_keys = set.intersection(*keys_per_variant)
     if not common_keys:
         return _empty_fig(f"No shared parameter points across {ablation_col} variants")
-    run_agg = run_agg[run_agg["_pp_key"].isin(common_keys)]
 
-    fig, ax = plt.subplots(figsize=_FIG_SINGLE)
-    sns.barplot(
+    run_agg = run_agg[run_agg["_pp_key"].isin(common_keys)]
+    run_agg["liar_share_rounded"] = run_agg["liar_share"].round(2)
+
+    allowed = [0.0, 0.2, 0.4, 0.6, 0.8]
+    run_agg = run_agg[run_agg["liar_share_rounded"].isin(allowed)]
+
+    liar_order = sorted(run_agg["liar_share_rounded"].unique())
+
+    g = sns.catplot(
         data=run_agg,
         x="_ablation_label",
-        order=label_order,
         y="stag_success_rate",
-        hue="_ablation_label",
-        hue_order=label_order,
-        palette=_ABLATION_PALETTE,
+        col="liar_share_rounded",
+        col_order=liar_order,
+        col_wrap=3,
+        kind="bar",
+        order=label_order,
         errorbar=("ci", 95),
-        legend=False,
-        ax=ax,
+        sharey=True,
+        height=4,
+        aspect=0.9,
+        palette=_ABLATION_PALETTE,
     )
-    sns.stripplot(
-        data=run_agg,
-        x="_ablation_label",
-        order=label_order,
-        y="stag_success_rate",
-        color="0.25",
-        size=4,
-        alpha=0.5,
-        jitter=True,
-        ax=ax,
+
+    g.set_axis_labels("", "Stag success rate")
+    g.set_titles("Liar fraction = {col_name}")
+    g.set(ylim=(-0.05, 1.05))
+
+    for ax, liar_value in zip(g.axes.flat, liar_order):
+        subset = run_agg[run_agg["liar_share_rounded"] == liar_value]
+
+        sns.stripplot(
+            data=subset,
+            x="_ablation_label",
+            y="stag_success_rate",
+            color="black",
+            alpha=0.25,
+            size=3,
+            jitter=0.2,
+            ax=ax,
+        )
+
+        ax.tick_params(axis="x", rotation=20)
+
+    g.fig.tight_layout()
+
+    g.fig.suptitle(
+        f"Coordination vs. {title_suffix} across liar fractions",
+        y=1.05,
+        fontsize=14,
     )
-    ax.set_xlabel(title_suffix)
-    ax.set_ylabel("Stag success rate")
-    ax.set_ylim(-0.05, 1.05)
-    fig.tight_layout()
-    return fig
+
+    return g.fig
 
 
 # ---------------------------------------------------------------------------
@@ -1222,16 +1314,16 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         fig_accuracy_over_rounds,
     ),
     "fig3_calibration": (
-        "Confidence Calibration by Role",
-        fig_confidence_calibration,
+        "Expected Calibration Error (table)",
+        fig3_ece_table,
     ),
     "fig4_influence": (
         "Liar Influence (Binned Liar Fraction)",
         fig_liar_influence,
     ),
     "fig5_payoffs": (
-        "Payoff by Role and Liar Fraction",
-        fig_payoff_distributions,
+        "Honest-agent payoff table",
+        fig5_honest_payoff_table,
     ),
     "fig6_heatmap": (
         "Accuracy Heatmap by Threshold",
@@ -1240,10 +1332,6 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
     "fig7_consensus_entropy": (
         "Consensus & Entropy Dynamics",
         fig_consensus_entropy,
-    ),
-    "fig8_persistence": (
-        "Persistence by Role and Liar Fraction",
-        fig_persistence_by_role,
     ),
     "fig9_coordination_dynamics": (
         "Coordination Dynamics Over Rounds",
@@ -1303,13 +1391,22 @@ def generate_all_figures(
     for key in keys:
         title, fn = FIGURE_REGISTRY[key]
         print(f"  generating {key}: {title} ...")
-        fig = fn(data)
-        path = out / f"{key}.{fmt}"
-        fig.savefig(path)
-        plt.close(fig)
-        saved.append(path)
-        print(f"    -> {path}")
-
+        result = fn(data)
+        # If function returns a matplotlib Figure → save it
+        if isinstance(result, plt.Figure):
+            path = out / f"{key}.{fmt}"
+            result.savefig(path)
+            plt.close(result)
+            saved.append(path)
+            print(f"    -> {path}")
+        elif isinstance(result, str):
+            path = out / f"{key}.txt"
+            path.write_text(result, encoding="utf-8")
+            saved.append(path)
+            print(f"    -> {path}")
+        else:
+            # Table or non-figure output
+            print(f"    (no figure generated for {key})")
     return saved
 
 
