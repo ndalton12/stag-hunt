@@ -2,7 +2,6 @@
 
 Expected calibration error computed over confidence bins (8 equal-width bins on [0, 1]).
 
-       model_short    ece  samples  bins_used
-        gpt-5-mini 0.0366      186          6
-gpt-5.2-2025-12-11 0.0752      207          5
-      llama-3.1-8b 0.0807      247          7
+model_short    ece  samples  bins_used
+ gpt-5-nano 0.1126      631          4
+ gpt-5-mini 0.1790      615          7

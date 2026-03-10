@@ -482,7 +482,27 @@ def _build_sweep_summary_path(log_dir: Path, sweep_id: str) -> Path:
 
 
 def _build_sweep_points_path(log_dir: Path, sweep_id: str, configured: str) -> Path:
-    """Build path for sweep points CSV using the sweep_id."""
+    """Build path for pending (to-run) sweep points CSV."""
+    if configured:
+        configured_path = Path(configured)
+        suffix = configured_path.suffix if configured_path.suffix else ".csv"
+        return configured_path.with_name(f"{configured_path.stem}_pending{suffix}")
+    return log_dir / f"{sweep_id}_sweep_points_pending.csv"
+
+
+def _build_sweep_points_all_path(log_dir: Path, sweep_id: str, configured: str) -> Path:
+    """Build path for full tracked sweep points (pending + completed)."""
+    if configured:
+        configured_path = Path(configured)
+        suffix = configured_path.suffix if configured_path.suffix else ".csv"
+        return configured_path.with_name(f"{configured_path.stem}_all{suffix}")
+    return log_dir / f"{sweep_id}_sweep_points_all.csv"
+
+
+def _build_sweep_points_legacy_path(
+    log_dir: Path, sweep_id: str, configured: str
+) -> Path:
+    """Legacy path used before pending/all split (for backward compatibility)."""
     if configured:
         return Path(configured)
     return log_dir / f"{sweep_id}_sweep_points.csv"
@@ -523,6 +543,18 @@ def _save_sweep_points(path: Path, points: list[SweepPoint]) -> None:
     raise ValueError(
         f"Unsupported sweep point output format '{suffix or '<none>'}'. Use .csv."
     )
+
+
+def _dedupe_points_by_id(points: list[SweepPoint]) -> list[SweepPoint]:
+    """Keep first occurrence of each point_id, preserving input order."""
+    deduped: list[SweepPoint] = []
+    seen: set[str] = set()
+    for point in points:
+        if point.point_id in seen:
+            continue
+        seen.add(point.point_id)
+        deduped.append(point)
+    return deduped
 
 
 def _estimate_tokens_for_point(
@@ -720,22 +752,64 @@ async def main() -> None:
         sweep_id = _generate_sweep_id(args.eval_prefix)
         print(f"Generated sweep-id: {sweep_id}")
 
+    summary_path = _build_sweep_summary_path(log_dir, sweep_id)
+    points_path = _build_sweep_points_path(log_dir, sweep_id, args.save_sweep_points)
+    points_all_path = _build_sweep_points_all_path(
+        log_dir, sweep_id, args.save_sweep_points
+    )
+    # Merge with existing sweep points so reruns can add new points from ANY
+    # parameter changes (including larger ablation subsets) without losing old ones.
+    existing_points: list[SweepPoint] = []
+    legacy_points_path = _build_sweep_points_legacy_path(
+        log_dir, sweep_id, args.save_sweep_points
+    )
+    if points_all_path.exists():
+        existing_source = points_all_path
+    elif points_path.exists():
+        existing_source = points_path
+    else:
+        existing_source = legacy_points_path
+    if existing_source.exists():
+        try:
+            existing_points = _assign_point_ids(_load_sweep_points(existing_source))
+        except Exception as exc:  # pragma: no cover - defensive path
+            print(
+                f"Warning: could not load existing sweep points from {existing_source}: {exc}"
+            )
+            existing_points = []
+
+    generated_count = len(points)
+    existing_ids = {p.point_id for p in existing_points}
+    generated_ids = {p.point_id for p in points}
+    merged_points = _dedupe_points_by_id(existing_points + points)
+    added_count = len(generated_ids - existing_ids)
+    if existing_points:
+        print(
+            f"Sweep points merge: existing={len(existing_ids)} "
+            f"generated={generated_count} added={added_count} "
+            f"total={len(merged_points)}"
+        )
+    points = merged_points
+    # Save full tracked set (for future incremental merges).
+    _save_sweep_points(points_all_path, points)
+
     completed_ids = _load_completed_ids(log_dir)
-    total_generated = len(points)
+    total_points = len(points)
     if completed_ids:
         points = [p for p in points if p.point_id not in completed_ids]
-        skipped = total_generated - len(points)
+        skipped = total_points - len(points)
         if skipped:
             print(
                 f"Resuming: skipped {skipped} already-completed points "
-                f"({len(points)} remaining of {total_generated})"
+                f"({len(points)} remaining of {total_points})"
             )
     if not points:
+        # Keep pending points file in sync even if empty.
+        _save_sweep_points(points_path, points)
         print("All sweep points already completed. Nothing to run.")
         return
 
-    summary_path = _build_sweep_summary_path(log_dir, sweep_id)
-    points_path = _build_sweep_points_path(log_dir, sweep_id, args.save_sweep_points)
+    # Save pending-only run queue (what this invocation can execute).
     _save_sweep_points(points_path, points)
 
     total_est_input = 0
@@ -752,9 +826,11 @@ async def main() -> None:
         total_est_all += est["estimated_total_tokens"]
 
     print(f"Sweep ID: {sweep_id}")
-    print(f"Sweep runs: {len(points)}")
+    print(f"Sweep runs to execute: {len(points)}")
+    print(f"Sweep points tracked: {total_points}")
     print(f"Summary CSV: {summary_path}")
-    print(f"Sweep points: {points_path}")
+    print(f"Sweep points (pending): {points_path}")
+    print(f"Sweep points (all): {points_all_path}")
     print(f"Max concurrency: {args.max_concurrency}")
     print(f"To resume this sweep later, use: --sweep-id {sweep_id}")
     print(
