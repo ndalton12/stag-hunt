@@ -46,7 +46,7 @@ def _apply_style() -> None:
     sns.set_theme(style=_THEME)
     plt.rcParams.update(
         {
-            "figure.dpi": 150,
+            "figure.dpi": 200,
             "savefig.dpi": 200,
             "savefig.bbox": "tight",
         }
@@ -356,10 +356,10 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
     )
 
     models = _sorted_models(run_agg)
-    # Drop M=1 threshold rows — success is trivially near-1.0 when only
-    # one agent needs to choose stag, making the row uninformative.
     all_thresholds = sorted(run_agg["stag_success_threshold"].unique())
-    thresholds = all_thresholds  # fallback: keep everything
+    # Drop M=1 — success is trivially near-1.0 when only one agent must choose
+    # stag, making those panels uninformative. Fall back to all if none remain.
+    thresholds = [t for t in all_thresholds if t > 1] or all_thresholds
 
     pairs = sorted(
         {
@@ -418,6 +418,7 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
             linestyle="--",
             color="black",
             alpha=0.6,
+            label="M/N threshold",
         )
         row, col = divmod(idx, n_cols)
         ax.set_title(f"N={n_agents}, M={threshold}", fontsize=10)
@@ -425,6 +426,7 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
         ax.set_ylabel("Stag success rate" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
         ax.tick_params(axis="x", rotation=0)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
         ax.xaxis.set_major_formatter(mticker.PercentFormatter(1.0))
         if ax.get_legend():
             ax.get_legend().remove()
@@ -489,22 +491,21 @@ def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
                 palette=_LIAR_SHARE_PALETTE,
                 errorbar=("ci", 95),
             )
-            ax.text(
-                0.05,
-                0.05,
-                model,
-                transform=ax.transAxes,
-                fontsize=14,
-                fontweight="bold",
-                va="bottom",
-                color="0.5",
-            )
+            if row == 0:
+                ax.set_title(model, fontsize=10)
             ax.set_xlabel("Round" if row == n_rows - 1 else "")
             ax.set_ylabel(metric_label if col == 0 else "")
             ax.set_ylim(-0.05, 1.05)
             ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
             if ax.get_legend():
                 ax.get_legend().remove()
+
+    # Zoom confidence row: values cluster in upper range so the full [0,1]
+    # axis wastes most of the space.
+    conf_col = rm["confidence_mean"].dropna()
+    if not conf_col.empty and len(metrics) > 1:
+        conf_min = max(0.0, float(conf_col.quantile(0.01)) - 0.05)
+        axes[1, 0].set_ylim(conf_min, 1.02)
 
     _add_figure_legend(
         fig,
@@ -744,15 +745,7 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
             ax=ax,
         )
-        ax.text(
-            0.05,
-            0.95,
-            model,
-            transform=ax.transAxes,
-            fontsize=8,
-            va="top",
-            color="0.4",
-        )
+        ax.set_title(model, fontsize=10)
         ax.set_xlabel("Liar fraction")
         ax.set_ylabel("Influence on later agents" if col == 0 else "")
         ax.set_ylim(0, 1.05)
@@ -997,21 +990,19 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
                 & (rm["model_short"] == model)
             ]
 
-            sns.lineplot(
+            _lineplot_with_errorbars(
+                ax=ax,
                 data=subset.dropna(subset=["honest_consensus_rate"]),
                 x="round",
                 y="honest_consensus_rate",
                 hue="liar_share_bin",
                 hue_order=bin_order,
-                marker="o",
                 palette=_LIAR_SHARE_PALETTE,
                 errorbar=("ci", 95),
-                ax=ax,
             )
 
             ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
             ax.set_xlabel("Round" if row == n_rows - 1 else "")
-            ax.set_ylabel("Honest-agent consensus rate" if col == 0 else "")
             ax.set_ylim(-0.05, 1.05)
 
             if ax.get_legend():
@@ -1021,16 +1012,10 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
     for col, model in enumerate(models):
         axes[0, col].set_title(model)
 
-    # Row labels = threshold
+    # Row labels embedded in the first-column y-axis label so tight_layout
+    # handles spacing automatically (avoids the fragile annotate xy offset).
     for row, threshold in enumerate(thresholds):
-        axes[row, 0].annotate(
-            f"M={threshold}",
-            xy=(-0.35, 0.5),
-            xycoords="axes fraction",
-            rotation=90,
-            va="center",
-            fontsize=12,
-        )
+        axes[row, 0].set_ylabel(f"M={threshold}\nHonest-agent consensus rate")
 
     _add_figure_legend(
         fig,
@@ -1041,7 +1026,7 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
         frameon=True,
     )
 
-    fig.tight_layout(rect=[0, 0, 0.98, 0.97])
+    fig.tight_layout()
     return fig
 
 
@@ -1074,26 +1059,17 @@ def fig_coordination_over_rounds(data: SweepData) -> plt.Figure:
     for col, model in enumerate(models):
         ax = axes[0, col]
         subset = rm[rm["model_short"] == model]
-        sns.lineplot(
+        _lineplot_with_errorbars(
+            ax=ax,
             data=subset,
             x="round",
             y="stag_success",
             hue="liar_share_bin",
             hue_order=bin_order,
-            marker="o",
             palette=_LIAR_SHARE_PALETTE,
-            errorbar=("ci", 68),
-            ax=ax,
+            errorbar=("ci", 95),
         )
-        ax.text(
-            0.05,
-            0.05,
-            model,
-            transform=ax.transAxes,
-            fontsize=8,
-            va="bottom",
-            color="0.4",
-        )
+        ax.set_title(model, fontsize=10)
         ax.set_xlabel("Round")
         ax.set_ylabel("Stag success rate" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
@@ -1144,30 +1120,25 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
     for col, model in enumerate(models):
         ax = axes[0, col]
         subset = honest[honest["model_short"] == model]
-        sns.lineplot(
+        _lineplot_with_errorbars(
+            ax=ax,
             data=subset,
             x="turn_index",
             y="is_correct",
             hue="liar_share_bin",
             hue_order=bin_order,
-            marker="o",
             palette=_LIAR_SHARE_PALETTE,
-            errorbar=("ci", 68),
-            ax=ax,
+            errorbar=("ci", 95),
         )
-        ax.text(
-            0.05,
-            0.05,
-            model,
-            transform=ax.transAxes,
-            fontsize=8,
-            va="bottom",
-            color="0.4",
-        )
+        ax.set_title(model, fontsize=10)
         ax.set_xlabel("Speaking position")
         ax.set_ylabel("Honest-agent accuracy" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        # turn_index is 0-based; display as 1-based for readability
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda x, pos: str(int(x) + 1) if x == int(x) else "")
+        )
         if ax.get_legend():
             ax.get_legend().remove()
 
@@ -1285,8 +1256,8 @@ def _matched_variant_round_table(
     if "model_pool" in points.columns:
         points["model_pool"] = points["model_pool"].fillna("").astype(str)
     if "model_pool" in variant_points.columns:
-        variant_points["model_pool"] = variant_points["model_pool"].fillna("").astype(
-            str
+        variant_points["model_pool"] = (
+            variant_points["model_pool"].fillna("").astype(str)
         )
 
     base_points = points[points["ablation_code"] == "base"].copy()
