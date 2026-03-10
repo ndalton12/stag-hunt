@@ -1,0 +1,18 @@
+# Fig 13 — H1 vs H3 Matched Roundwise Coordination (Text Table)
+
+Rows are rounds; each row compares matched H3/H1 run pairs at that round.
+Statistical test: exact McNemar (paired binary outcomes) with Holm correction across rounds.
+0->1 pairs means H1=0 and H3=1.
+
+Total H3 runs: 49
+Matched pairs used: 49
+Unmatched H3 runs: 0
+Ambiguous point matches (>1 base point): 0
+Missing base runs for mapped points: 0
+Ambiguous base runs (>1 run for base point): 0
+
+ Round  Matched pairs H1 rate H3 rate Delta (pp)  0->1 pairs  1->0 pairs  Discordant McNemar p Holm p  Significant (Holm<0.05)
+     1             49   0.612   0.694      +8.16           7           3          10    0.3438      1                    False
+     2             30   0.733   0.700      -3.33           2           3           5         1      1                    False
+     3             15   0.600   0.600      +0.00           1           1           2         1      1                    False
+     4             15   0.667   0.733      +6.67           2           1           3         1      1                    False

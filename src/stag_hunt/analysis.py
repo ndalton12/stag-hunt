@@ -100,6 +100,7 @@ class SweepData:
     round_metrics: pd.DataFrame
     agent_metrics: pd.DataFrame
     agent_summary: pd.DataFrame
+    sweep_points: pd.DataFrame
 
 
 def _find_csvs(logs_dir: Path, suffix: str) -> list[Path]:
@@ -111,6 +112,17 @@ def _read_and_concat(paths: list[Path]) -> pd.DataFrame:
     """Read and concatenate multiple CSVs, dropping exact duplicates."""
     if not paths:
         raise FileNotFoundError("No CSV files found for pattern")
+    dfs = [pd.read_csv(p) for p in paths]
+    return pd.concat(dfs, ignore_index=True).drop_duplicates()
+
+
+def _read_optional_sweep_points(logs: Path) -> pd.DataFrame:
+    """Load available sweep-point CSVs (if present) for ablation pairing."""
+    paths = sorted(logs.glob("*_sweep_points_all.csv"))
+    if not paths:
+        paths = sorted(logs.glob("*_sweep_points.csv"))
+    if not paths:
+        return pd.DataFrame()
     dfs = [pd.read_csv(p) for p in paths]
     return pd.concat(dfs, ignore_index=True).drop_duplicates()
 
@@ -135,6 +147,7 @@ def load_sweep_data(logs_dir: str | Path) -> SweepData:
     round_metrics = _read_and_concat(_find_csvs(logs, "_round_metrics.csv"))
     agent_metrics = _read_and_concat(_find_csvs(logs, "_agent_metrics.csv"))
     agent_summary = _read_and_concat(_find_csvs(logs, "_agent_summary.csv"))
+    sweep_points = _read_optional_sweep_points(logs)
 
     # Short model names for plot labels
     for df in (runs, round_metrics, agent_metrics, agent_summary):
@@ -158,7 +171,7 @@ def load_sweep_data(logs_dir: str | Path) -> SweepData:
         0, float("nan")
     )
 
-    # Enrich agent and round tables with run-level parameters and ablation codes
+    # Enrich agent and round tables with run-level parameters
     run_params = runs[
         [
             "run_id",
@@ -166,23 +179,10 @@ def load_sweep_data(logs_dir: str | Path) -> SweepData:
             "num_liars",
             "num_rounds",
             "stag_success_threshold",
-            "order_ablation",
-            "adversary_ablation",
-            "heterogeneity_ablation",
         ]
     ].drop_duplicates()
     agent_summary = agent_summary.merge(run_params, on="run_id", how="left")
     agent_metrics = agent_metrics.merge(run_params, on="run_id", how="left")
-    _ablation_cols = ["order_ablation", "adversary_ablation", "heterogeneity_ablation"]
-    _merge_cols = ["run_id"] + [
-        c for c in _ablation_cols if c not in round_metrics.columns
-    ]
-    if len(_merge_cols) > 1:
-        round_metrics = round_metrics.merge(
-            run_params[_merge_cols].drop_duplicates(),
-            on="run_id",
-            how="left",
-        )
 
     for df in (agent_metrics, agent_summary):
         if "liar_share" not in df.columns:
@@ -211,6 +211,7 @@ def load_sweep_data(logs_dir: str | Path) -> SweepData:
         round_metrics=round_metrics,
         agent_metrics=agent_metrics,
         agent_summary=agent_summary,
+        sweep_points=sweep_points,
     )
 
 
@@ -280,6 +281,50 @@ def _lineplot_with_errorbars(
         err_kws={"capsize": 2, "elinewidth": 1},
         sort=sort,
         ax=ax,
+    )
+
+
+def _base_only_data(data: SweepData) -> SweepData:
+    """Return a copy of *data* restricted to default (non-ablation) runs."""
+    runs = data.runs.copy()
+
+    default_checks = []
+    if "order_ablation" in runs.columns:
+        default_checks.append(runs["order_ablation"] == "a1")
+    if "adversary_ablation" in runs.columns:
+        default_checks.append(runs["adversary_ablation"] == "base")
+    if "heterogeneity_ablation" in runs.columns:
+        default_checks.append(runs["heterogeneity_ablation"] == "h1")
+
+    if default_checks:
+        base_mask = default_checks[0]
+        for cond in default_checks[1:]:
+            base_mask = base_mask & cond
+        base_runs = runs[base_mask].copy()
+    else:
+        base_runs = runs.copy()
+
+    base_run_ids = set(base_runs["run_id"])
+    round_metrics = data.round_metrics[
+        data.round_metrics["run_id"].isin(base_run_ids)
+    ].copy()
+    agent_metrics = data.agent_metrics[
+        data.agent_metrics["run_id"].isin(base_run_ids)
+    ].copy()
+    agent_summary = data.agent_summary[
+        data.agent_summary["run_id"].isin(base_run_ids)
+    ].copy()
+
+    sweep_points = data.sweep_points.copy()
+    if not sweep_points.empty and "ablation_code" in sweep_points.columns:
+        sweep_points = sweep_points[sweep_points["ablation_code"] == "base"].copy()
+
+    return SweepData(
+        runs=base_runs,
+        round_metrics=round_metrics,
+        agent_metrics=agent_metrics,
+        agent_summary=agent_summary,
+        sweep_points=sweep_points,
     )
 
 
@@ -581,13 +626,25 @@ def _calibration_bins_for_honest_agents(data: SweepData) -> pd.DataFrame:
     ags = data.agent_summary.dropna(subset=["confidence_mean", "accuracy"]).copy()
     if ags.empty:
         return pd.DataFrame(
-            columns=["model_short", "confidence_bin", "mean_confidence", "mean_accuracy", "n"]
+            columns=[
+                "model_short",
+                "confidence_bin",
+                "mean_confidence",
+                "mean_accuracy",
+                "n",
+            ]
         )
 
     ags = ags[ags["role"] == "Honest"].copy()
     if ags.empty:
         return pd.DataFrame(
-            columns=["model_short", "confidence_bin", "mean_confidence", "mean_accuracy", "n"]
+            columns=[
+                "model_short",
+                "confidence_bin",
+                "mean_confidence",
+                "mean_accuracy",
+                "n",
+            ]
         )
 
     ags["confidence_mean"] = ags["confidence_mean"].clip(0, 1)
@@ -899,12 +956,9 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
     if honest.empty:
         return _empty_fig("No honest-agent data found for consensus plot")
 
-    honest_round = (
-        honest.groupby(["run_id", "round"], as_index=False)
-        .agg(
-            num_honest=("reported_is_stag", "size"),
-            num_honest_stag=("reported_is_stag", "sum"),
-        )
+    honest_round = honest.groupby(["run_id", "round"], as_index=False).agg(
+        num_honest=("reported_is_stag", "size"),
+        num_honest_stag=("reported_is_stag", "sum"),
     )
     honest_round["num_honest_hare"] = (
         honest_round["num_honest"] - honest_round["num_honest_stag"]
@@ -1130,173 +1184,352 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Shared ablation figure helper
+# Figure 11-13 – Matched ablation tables (text)
 # ---------------------------------------------------------------------------
 
-_ORDER_ABLATION_LABELS = {"a1": "A1: fixed", "a2": "A2: random", "a3": "A3: reversed"}
-_ADVERSARY_ABLATION_LABELS = {"base": "Base: flip", "b3": "B3: random noise"}
-_HETEROGENEITY_ABLATION_LABELS = {
-    "h1": "H1: homogeneous",
-    "h2": "H2: mixed",
-    "h3": "H3: adversarial",
-}
-_ABLATION_PALETTE = "Set1"
 
-
-_PARAM_POINT_COLS = [
+_B3_POINT_KEY_COLS = [
     "model",
     "num_agents",
-    "num_liars",
     "num_rounds",
+    "num_liars",
     "stag_success_threshold",
+    "payoff_stag_success",
+    "payoff_hare_when_stag_success",
+    "payoff_stag_fail",
+    "payoff_hare_fail",
+    "order_ablation",
+    "heterogeneity_ablation",
+    "h3_liar_policy",
+    "model_pool",
+    "replicate",
+    "seed",
+]
+
+_HET_POINT_KEY_COLS = [
+    "model",
+    "num_agents",
+    "num_rounds",
+    "num_liars",
+    "stag_success_threshold",
+    "payoff_stag_success",
+    "payoff_hare_when_stag_success",
+    "payoff_stag_fail",
+    "payoff_hare_fail",
+    "order_ablation",
+    "adversary_ablation",
+    "h3_liar_policy",
+    "replicate",
+    "seed",
 ]
 
 
-def _ablation_coordination_figure(
+def _exact_mcnemar_pvalue(n_01: int, n_10: int) -> float:
+    """Exact two-sided McNemar p-value via Binomial(n_01+n_10, 0.5)."""
+    n_disc = n_01 + n_10
+    if n_disc == 0:
+        return 1.0
+
+    k = min(n_01, n_10)
+    tail = sum(math.comb(n_disc, i) for i in range(k + 1)) / (2**n_disc)
+    return min(1.0, 2 * tail)
+
+
+def _holm_adjust(p_values: list[float]) -> list[float]:
+    """Holm-Bonferroni adjusted p-values (same order as input)."""
+    m = len(p_values)
+    if m == 0:
+        return []
+
+    order = sorted(range(m), key=lambda i: p_values[i])
+    adjusted = [1.0] * m
+    running_max = 0.0
+    for rank, idx in enumerate(order):
+        candidate = (m - rank) * p_values[idx]
+        running_max = max(running_max, candidate)
+        adjusted[idx] = min(1.0, running_max)
+    return adjusted
+
+
+def _matched_variant_round_table(
     data: SweepData,
-    ablation_col: str,
-    ablation_labels: dict[str, str],
-    title_suffix: str,
-) -> plt.Figure:
-    """Bar + strip plot comparing stag-success rate across ablation variants.
-
-    Shared implementation for order / adversary / heterogeneity ablation figures.
-
-    Because ablation runs typically cover a small subset of parameter points,
-    we restrict to parameter points that have data for *every* ablation
-    variant, ensuring an apples-to-apples comparison.  Each dot is one run's
-    mean stag-success rate; bars show the overall mean with 95% CI.
-    """
+    *,
+    heading: str,
+    baseline_label: str,
+    variant_label: str,
+    variant_points: pd.DataFrame,
+    variant_runs: pd.DataFrame,
+    point_key_cols: list[str],
+) -> str:
+    """Build a matched baseline-vs-variant roundwise significance table."""
+    runs = data.runs.copy()
     rm = data.round_metrics.copy()
-    if ablation_col not in rm.columns:
-        return _empty_fig(f"No {ablation_col} column found")
+    points = data.sweep_points.copy()
 
-    rm = rm.dropna(subset=[ablation_col])
-    variants = sorted(rm[ablation_col].unique())
-    if len(variants) < 2:
-        return _empty_fig(f"Only one {ablation_col} value found — nothing to compare")
+    if runs.empty or rm.empty or points.empty:
+        return f"No run/round data found for {variant_label} matched analysis.\n"
 
-    rm["_ablation_label"] = (
-        rm[ablation_col].map(ablation_labels).fillna(rm[ablation_col])
-    )
-
-    label_order = [ablation_labels.get(v, v) for v in variants]
-
-    # Aggregate per run
-    group_cols = ["run_id", "_ablation_label", "liar_share"] + [
-        c for c in _PARAM_POINT_COLS if c in rm.columns
-    ]
-    run_agg = (
-        rm.groupby(group_cols)
-        .agg(stag_success_rate=("stag_success", "mean"))
-        .reset_index()
-    )
-
-    # Build a parameter-point key and keep only points present in ALL variants
-    pp_cols = [c for c in _PARAM_POINT_COLS if c in run_agg.columns]
-    run_agg["_pp_key"] = run_agg[pp_cols].astype(str).agg("|".join, axis=1)
-    keys_per_variant = run_agg.groupby("_ablation_label")["_pp_key"].apply(set)
-    common_keys = set.intersection(*keys_per_variant)
-    if not common_keys:
-        return _empty_fig(f"No shared parameter points across {ablation_col} variants")
-
-    run_agg = run_agg[run_agg["_pp_key"].isin(common_keys)]
-    run_agg["liar_share_rounded"] = run_agg["liar_share"].round(2)
-
-    allowed = [0.0, 0.2, 0.4, 0.6, 0.8]
-    run_agg = run_agg[run_agg["liar_share_rounded"].isin(allowed)]
-
-    liar_order = sorted(run_agg["liar_share_rounded"].unique())
-
-    g = sns.catplot(
-        data=run_agg,
-        x="_ablation_label",
-        y="stag_success_rate",
-        col="liar_share_rounded",
-        col_order=liar_order,
-        col_wrap=3,
-        kind="bar",
-        order=label_order,
-        errorbar=("ci", 95),
-        sharey=True,
-        height=4,
-        aspect=0.9,
-        palette=_ABLATION_PALETTE,
-    )
-
-    g.set_axis_labels("", "Stag success rate")
-    g.set_titles("Liar fraction = {col_name}")
-    g.set(ylim=(-0.05, 1.05))
-
-    for ax, liar_value in zip(g.axes.flat, liar_order):
-        subset = run_agg[run_agg["liar_share_rounded"] == liar_value]
-
-        sns.stripplot(
-            data=subset,
-            x="_ablation_label",
-            y="stag_success_rate",
-            color="black",
-            alpha=0.25,
-            size=3,
-            jitter=0.2,
-            ax=ax,
+    required_point_cols = {"point_id", "ablation_code", *point_key_cols}
+    if not required_point_cols.issubset(points.columns):
+        return (
+            "Sweep-point metadata is missing required columns for deterministic "
+            f"{variant_label}/{baseline_label} pairing.\n"
         )
 
-        ax.tick_params(axis="x", rotation=20)
+    runs["point_id"] = runs["run_id"].astype(str).str.rsplit("_", n=1).str[-1]
+    if "point_id" not in variant_runs.columns and "run_id" in variant_runs.columns:
+        variant_runs = variant_runs.copy()
+        variant_runs["point_id"] = (
+            variant_runs["run_id"].astype(str).str.rsplit("_", n=1).str[-1]
+        )
+    if "model_pool" in points.columns:
+        points["model_pool"] = points["model_pool"].fillna("").astype(str)
+    if "model_pool" in variant_points.columns:
+        variant_points["model_pool"] = variant_points["model_pool"].fillna("").astype(
+            str
+        )
 
-    g.fig.tight_layout()
+    base_points = points[points["ablation_code"] == "base"].copy()
+    if base_points.empty:
+        return "No base sweep points found for matched ablation analysis.\n"
+    if variant_points.empty:
+        return f"No {variant_label} ablation sweep points found.\n"
+    if variant_runs.empty:
+        return f"No {variant_label} ablation runs found.\n"
 
-    g.fig.suptitle(
-        f"Coordination vs. {title_suffix} across liar fractions",
-        y=1.05,
-        fontsize=14,
+    base_points_keyed = (
+        base_points.groupby(point_key_cols, as_index=False)
+        .agg(base_point_id=("point_id", "first"), n_base_points=("point_id", "size"))
+        .copy()
+    )
+    variant_to_base_points = (
+        variant_points.merge(
+            base_points_keyed,
+            on=point_key_cols,
+            how="left",
+        )
+        .rename(columns={"point_id": "variant_point_id"})
+        .drop_duplicates(subset=["variant_point_id"])
     )
 
-    return g.fig
+    base_ids = set(base_points["point_id"])
+    base_run_lookup = (
+        runs[runs["point_id"].isin(base_ids)]
+        .groupby("point_id", as_index=False)
+        .agg(base_run_id=("run_id", "first"), n_base_run_candidates=("run_id", "size"))
+        .rename(columns={"point_id": "base_point_id"})
+    )
+    if base_run_lookup.empty:
+        return "No base runs found to match against variant runs.\n"
+
+    pairs = (
+        variant_runs.merge(
+            variant_to_base_points[
+                ["variant_point_id", "base_point_id", "n_base_points"]
+            ],
+            left_on="point_id",
+            right_on="variant_point_id",
+            how="left",
+        )
+        .merge(base_run_lookup, on="base_point_id", how="left")
+        .copy()
+    )
+
+    total_variant = int(len(variant_runs))
+    unmatched = int(pairs["base_point_id"].isna().sum())
+    ambiguous_points = int((pairs["n_base_points"].fillna(0) > 1).sum())
+    missing_base_runs = int(
+        (pairs["base_point_id"].notna() & pairs["base_run_id"].isna()).sum()
+    )
+    ambiguous_base_runs = int((pairs["n_base_run_candidates"].fillna(0) > 1).sum())
+
+    valid_pairs = pairs[
+        pairs["base_run_id"].notna()
+        & (pairs["n_base_points"] == 1)
+        & (pairs["n_base_run_candidates"] == 1)
+    ][["run_id", "base_run_id"]].rename(columns={"run_id": "variant_run_id"})
+    valid_pairs = valid_pairs.drop_duplicates()
+
+    if valid_pairs.empty:
+        lines = [
+            heading,
+            "",
+            f"No unambiguous {variant_label}/{baseline_label} matched pairs were found.",
+            f"Total {variant_label} runs: {total_variant}",
+            f"Unmatched {variant_label} runs: {unmatched}",
+            f"Ambiguous point matches (>1 base point): {ambiguous_points}",
+            f"Missing base runs for mapped points: {missing_base_runs}",
+            f"Ambiguous base runs (>1 run for base point): {ambiguous_base_runs}",
+            "",
+        ]
+        return "\n".join(lines)
+
+    rm = rm[["run_id", "round", "stag_success"]].copy()
+    rm["stag_success"] = _as_bool(rm["stag_success"])
+
+    base_round = rm.rename(
+        columns={"run_id": "base_run_id", "stag_success": "base_stag_success"}
+    )
+    variant_round = rm.rename(
+        columns={"run_id": "variant_run_id", "stag_success": "variant_stag_success"}
+    )
+
+    paired_rounds = (
+        valid_pairs.merge(base_round, on="base_run_id", how="inner")
+        .merge(variant_round, on=["variant_run_id", "round"], how="inner")
+        .copy()
+    )
+    if paired_rounds.empty:
+        lines = [
+            heading,
+            "",
+            "Matched run pairs found, but no overlapping round-level observations.",
+            f"Matched run pairs: {len(valid_pairs)}",
+            "",
+        ]
+        return "\n".join(lines)
+
+    rows: list[dict[str, float | int | str]] = []
+    for round_num, grp in paired_rounds.groupby("round", sort=True):
+        n_pairs = int(len(grp))
+        base_rate = float(grp["base_stag_success"].mean())
+        variant_rate = float(grp["variant_stag_success"].mean())
+
+        n_01 = int(
+            ((~grp["base_stag_success"]) & grp["variant_stag_success"]).sum()
+        )  # base=0,variant=1
+        n_10 = int(
+            (grp["base_stag_success"] & (~grp["variant_stag_success"])).sum()
+        )  # base=1,variant=0
+        n_disc = n_01 + n_10
+        p_value = _exact_mcnemar_pvalue(n_01, n_10)
+
+        rows.append(
+            {
+                "Round": int(round_num),
+                "Matched pairs": n_pairs,
+                f"{baseline_label} rate": base_rate,
+                f"{variant_label} rate": variant_rate,
+                "Delta (pp)": 100 * (variant_rate - base_rate),
+                "0->1 pairs": n_01,
+                "1->0 pairs": n_10,
+                "Discordant": n_disc,
+                "McNemar p": p_value,
+            }
+        )
+
+    summary = pd.DataFrame(rows).sort_values("Round").reset_index(drop=True)
+    summary["Holm p"] = _holm_adjust(summary["McNemar p"].tolist())
+    summary["Significant (Holm<0.05)"] = summary["Holm p"] < 0.05
+
+    summary[f"{baseline_label} rate"] = summary[f"{baseline_label} rate"].map(
+        lambda x: f"{x:.3f}"
+    )
+    summary[f"{variant_label} rate"] = summary[f"{variant_label} rate"].map(
+        lambda x: f"{x:.3f}"
+    )
+    summary["Delta (pp)"] = summary["Delta (pp)"].map(lambda x: f"{x:+.2f}")
+    summary["McNemar p"] = summary["McNemar p"].map(lambda x: f"{x:.4g}")
+    summary["Holm p"] = summary["Holm p"].map(lambda x: f"{x:.4g}")
+
+    lines = [
+        heading,
+        "",
+        f"Rows are rounds; each row compares matched {variant_label}/{baseline_label} run pairs at that round.",
+        "Statistical test: exact McNemar (paired binary outcomes) with Holm correction across rounds.",
+        f"0->1 pairs means {baseline_label}=0 and {variant_label}=1.",
+        "",
+        f"Total {variant_label} runs: {total_variant}",
+        f"Matched pairs used: {len(valid_pairs)}",
+        f"Unmatched {variant_label} runs: {unmatched}",
+        f"Ambiguous point matches (>1 base point): {ambiguous_points}",
+        f"Missing base runs for mapped points: {missing_base_runs}",
+        f"Ambiguous base runs (>1 run for base point): {ambiguous_base_runs}",
+        "",
+        summary.to_string(index=False),
+        "",
+    ]
+    return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Figure 12 – Order ablation comparison (a1 vs a2 vs a3)
-# ---------------------------------------------------------------------------
+def fig11_b3_matched_round_table(data: SweepData) -> str:
+    """Matched b3-vs-base stag-success comparison by round (text table)."""
+    points = data.sweep_points.copy()
+    runs = data.runs.copy()
 
+    if points.empty:
+        return "No sweep-point metadata found for b3 matched analysis.\n"
+    if runs.empty or "adversary_ablation" not in runs.columns:
+        return "No adversary_ablation run metadata found for b3 matched analysis.\n"
 
-def fig_order_ablation(data: SweepData) -> plt.Figure:
-    """Coordination rate vs liar fraction, comparing speaking-order variants."""
-    return _ablation_coordination_figure(
+    b3_mask = points["ablation_code"] == "b3"
+    if "adversary_ablation" in points.columns:
+        b3_mask = b3_mask | (points["adversary_ablation"] == "b3")
+    b3_points = points[b3_mask].copy()
+    b3_runs = runs[runs["adversary_ablation"] == "b3"].copy()
+
+    return _matched_variant_round_table(
         data,
-        "order_ablation",
-        _ORDER_ABLATION_LABELS,
-        "Speaking order",
+        heading="# Fig 11 — B3 Matched Roundwise Coordination (Text Table)",
+        baseline_label="Base",
+        variant_label="B3",
+        variant_points=b3_points,
+        variant_runs=b3_runs,
+        point_key_cols=_B3_POINT_KEY_COLS,
     )
 
 
-# ---------------------------------------------------------------------------
-# Figure 13 – Adversary ablation (base vs b3)
-# ---------------------------------------------------------------------------
+def fig12_h1_vs_h2_matched_table(data: SweepData) -> str:
+    """Matched h2-vs-h1 stag-success comparison by round (text table)."""
+    points = data.sweep_points.copy()
+    runs = data.runs.copy()
 
+    if points.empty:
+        return "No sweep-point metadata found for h2 matched analysis.\n"
+    if runs.empty or "heterogeneity_ablation" not in runs.columns:
+        return "No heterogeneity_ablation run metadata found for h2 matched analysis.\n"
 
-def fig_adversary_ablation(data: SweepData) -> plt.Figure:
-    """Coordination rate vs liar fraction, comparing adversary strategies."""
-    return _ablation_coordination_figure(
+    h2_mask = points["ablation_code"] == "h2"
+    if "heterogeneity_ablation" in points.columns:
+        h2_mask = h2_mask | (points["heterogeneity_ablation"] == "h2")
+    h2_points = points[h2_mask].copy()
+    h2_runs = runs[runs["heterogeneity_ablation"] == "h2"].copy()
+
+    return _matched_variant_round_table(
         data,
-        "adversary_ablation",
-        _ADVERSARY_ABLATION_LABELS,
-        "Adversary type",
+        heading="# Fig 12 — H1 vs H2 Matched Roundwise Coordination (Text Table)",
+        baseline_label="H1",
+        variant_label="H2",
+        variant_points=h2_points,
+        variant_runs=h2_runs,
+        point_key_cols=_HET_POINT_KEY_COLS,
     )
 
 
-# ---------------------------------------------------------------------------
-# Figure 14 – Heterogeneity ablation (h1 vs h2 vs h3)
-# ---------------------------------------------------------------------------
+def fig13_h1_vs_h3_matched_table(data: SweepData) -> str:
+    """Matched h3-vs-h1 stag-success comparison by round (text table)."""
+    points = data.sweep_points.copy()
+    runs = data.runs.copy()
 
+    if points.empty:
+        return "No sweep-point metadata found for h3 matched analysis.\n"
+    if runs.empty or "heterogeneity_ablation" not in runs.columns:
+        return "No heterogeneity_ablation run metadata found for h3 matched analysis.\n"
 
-def fig_heterogeneity_ablation(data: SweepData) -> plt.Figure:
-    """Coordination rate vs liar fraction, comparing model-composition strategies."""
-    return _ablation_coordination_figure(
+    h3_mask = points["ablation_code"] == "h3"
+    if "heterogeneity_ablation" in points.columns:
+        h3_mask = h3_mask | (points["heterogeneity_ablation"] == "h3")
+    h3_points = points[h3_mask].copy()
+    h3_runs = runs[runs["heterogeneity_ablation"] == "h3"].copy()
+
+    return _matched_variant_round_table(
         data,
-        "heterogeneity_ablation",
-        _HETEROGENEITY_ABLATION_LABELS,
-        "Model composition",
+        heading="# Fig 13 — H1 vs H3 Matched Roundwise Coordination (Text Table)",
+        baseline_label="H1",
+        variant_label="H3",
+        variant_points=h3_points,
+        variant_runs=h3_runs,
+        point_key_cols=_HET_POINT_KEY_COLS,
     )
 
 
@@ -1341,18 +1574,30 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         "Turn-Order Effects (A1: Fixed Order)",
         fig_turn_order_effects,
     ),
-    "fig12_order_ablation": (
-        "Order Ablation (A1 vs A2 vs A3)",
-        fig_order_ablation,
+    "fig11_b3_matched_table": (
+        "B3 Ablation Matched Roundwise Table",
+        fig11_b3_matched_round_table,
     ),
-    "fig13_adversary_ablation": (
-        "Adversary Ablation (Base vs B3)",
-        fig_adversary_ablation,
+    "fig12_h1_vs_h2_table": (
+        "H1 vs H2 Matched Roundwise Table",
+        fig12_h1_vs_h2_matched_table,
     ),
-    "fig14_heterogeneity_ablation": (
-        "Heterogeneity Ablation (H1 vs H2 vs H3)",
-        fig_heterogeneity_ablation,
+    "fig13_h1_vs_h3_table": (
+        "H1 vs H3 Matched Roundwise Table",
+        fig13_h1_vs_h3_matched_table,
     ),
+}
+
+_NON_ABLATION_FIGURE_KEYS = {
+    "fig1_coordination",
+    "fig2_accuracy_confidence",
+    "fig3_calibration",
+    "fig4_influence",
+    "fig5_payoffs",
+    "fig6_heatmap",
+    "fig7_consensus_entropy",
+    "fig9_coordination_dynamics",
+    "fig10_turn_order",
 }
 
 
@@ -1383,6 +1628,7 @@ def generate_all_figures(
     """
     _apply_style()
     data = load_sweep_data(logs_dir)
+    base_data = _base_only_data(data)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -1391,7 +1637,8 @@ def generate_all_figures(
     for key in keys:
         title, fn = FIGURE_REGISTRY[key]
         print(f"  generating {key}: {title} ...")
-        result = fn(data)
+        figure_data = base_data if key in _NON_ABLATION_FIGURE_KEYS else data
+        result = fn(figure_data)
         # If function returns a matplotlib Figure → save it
         if isinstance(result, plt.Figure):
             path = out / f"{key}.{fmt}"
