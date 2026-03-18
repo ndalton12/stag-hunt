@@ -32,6 +32,18 @@ _ROLE_COLORS = {"Honest": "#4C72B0", "Liar": "#DD8452"}
 _LIAR_SHARE_PALETTE = "viridis_r"
 _FIG_SINGLE = (8, 5)
 _FIG_WIDE = (12, 5)
+_DENSE_LINE_KWS = {
+    "marker": None,
+    "linewidth": 1.5,
+    "alpha": 0.95,
+    "err_kws": {"capsize": 1.2, "elinewidth": 0.8},
+}
+_DEFAULT_LINE_KWS = {
+    "marker": "o",
+    "linewidth": 1.8,
+    "alpha": 1.0,
+    "err_kws": {"capsize": 2, "elinewidth": 1},
+}
 
 _LIAR_BIN_ORDER = ["0\u201325%", "25\u201350%", "50\u201375%", "75\u2013100%"]
 
@@ -232,6 +244,13 @@ def _sorted_models(df: pd.DataFrame) -> list[str]:
     return sorted(df["model_short"].unique())
 
 
+def _model_color_map(df: pd.DataFrame) -> dict[str, tuple[float, float, float]]:
+    """Stable color mapping for all models present in *df*."""
+    models = _sorted_models(df)
+    palette = sns.color_palette(_MODEL_PALETTE, n_colors=len(models))
+    return dict(zip(models, palette))
+
+
 def _sorted_liar_labels(df: pd.DataFrame) -> list[str]:
     """Return unique liar_share_label values sorted by numeric value."""
     return sorted(
@@ -265,20 +284,23 @@ def _lineplot_with_errorbars(
     palette: str | dict[str, str],
     errorbar: tuple[str, int],
     sort: bool = True,
+    dense: bool = False,
 ) -> None:
     """Consistent lineplot styling with error bars instead of filled bands."""
+    style_kws = _DENSE_LINE_KWS if dense else _DEFAULT_LINE_KWS
     sns.lineplot(
         data=data,
         x=x,
         y=y,
         hue=hue,
         hue_order=hue_order,
-        marker="o",
-        linewidth=1.8,
+        marker=style_kws["marker"],
+        linewidth=style_kws["linewidth"],
+        alpha=style_kws["alpha"],
         palette=palette,
         errorbar=errorbar,
         err_style="bars",
-        err_kws={"capsize": 2, "elinewidth": 1},
+        err_kws=style_kws["err_kws"],
         sort=sort,
         ax=ax,
     )
@@ -355,7 +377,8 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
         .reset_index()
     )
 
-    models = _sorted_models(run_agg)
+    model_colors = _model_color_map(data.runs)
+    models = [m for m in _sorted_models(run_agg) if m in model_colors]
     all_thresholds = sorted(run_agg["stag_success_threshold"].unique())
     # Drop M=1 — success is trivially near-1.0 when only one agent must choose
     # stag, making those panels uninformative. Fall back to all if none remain.
@@ -406,7 +429,7 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
             y="stag_success_rate",
             hue="model_short",
             hue_order=models,
-            palette=_MODEL_PALETTE,
+            palette=model_colors,
             errorbar=("ci", 95),
             sort=False,
         )
@@ -470,7 +493,8 @@ def fig1_highlight(data: SweepData) -> plt.Figure:
         return _empty_fig("No data found for highlight setting N=5, M=3")
 
     subset = subset.sort_values("liar_share")
-    models = _sorted_models(subset)
+    model_colors = _model_color_map(data.runs)
+    models = [m for m in _sorted_models(subset) if m in model_colors]
 
     fig, ax = plt.subplots(1, 1, figsize=_FIG_SINGLE)
     _lineplot_with_errorbars(
@@ -480,7 +504,7 @@ def fig1_highlight(data: SweepData) -> plt.Figure:
         y="stag_success_rate",
         hue="model_short",
         hue_order=models,
-        palette=_MODEL_PALETTE,
+        palette=model_colors,
         errorbar=("ci", 95),
         sort=False,
     )
@@ -555,6 +579,7 @@ def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
                 hue_order=bin_order,
                 palette=_LIAR_SHARE_PALETTE,
                 errorbar=("ci", 95),
+                dense=True,
             )
             if row == 0:
                 ax.set_title(model, fontsize=10)
@@ -599,7 +624,8 @@ def fig2_alternate(data: SweepData) -> plt.Figure:
     if rm.empty:
         return _empty_fig("No multi-round runs found")
 
-    models = _sorted_models(rm)
+    model_colors = _model_color_map(data.runs)
+    models = [m for m in _sorted_models(rm) if m in model_colors]
     bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
     if not bin_order:
         return _empty_fig("No liar-fraction bins available")
@@ -629,8 +655,9 @@ def fig2_alternate(data: SweepData) -> plt.Figure:
                 y=metric_col,
                 hue="model_short",
                 hue_order=models,
-                palette=_MODEL_PALETTE,
+                palette=model_colors,
                 errorbar=("ci", 95),
+                dense=True,
             )
             if row == 0:
                 ax.set_title(f"Liar fraction {bin_label}", fontsize=10)
@@ -700,9 +727,8 @@ def fig_confidence_calibration(data: SweepData) -> plt.Figure:
         figsize=(5, 4),
     )
 
-    models = _sorted_models(ags)
-    palette = sns.color_palette(_MODEL_PALETTE, n_colors=len(models))
-    model_colors = dict(zip(models, palette))
+    model_colors = _model_color_map(data.runs)
+    models = [m for m in _sorted_models(ags) if m in model_colors]
 
     subset = cal[cal["role"] == "Honest"]
 
@@ -914,6 +940,84 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
     return fig
 
 
+def fig4_alternate(data: SweepData) -> plt.Figure:
+    """Liar-minus-honest influence gap by liar-fraction bin."""
+    am = data.agent_metrics.dropna(subset=["influence_on_later_agents"]).copy()
+    am = am[am["num_liars"] > 0]
+    if am.empty:
+        return _empty_fig("No data with liars found")
+
+    # Compute a paired gap per run: mean(liar influence) - mean(honest influence).
+    role_means = (
+        am.groupby(
+            ["run_id", "model_short", "liar_share_bin", "role"],
+            observed=False,
+        )
+        .agg(mean_influence=("influence_on_later_agents", "mean"))
+        .reset_index()
+    )
+    gap = role_means.pivot_table(
+        index=["run_id", "model_short", "liar_share_bin"],
+        columns="role",
+        values="mean_influence",
+        aggfunc="mean",
+    ).reset_index()
+    if "Liar" not in gap.columns or "Honest" not in gap.columns:
+        return _empty_fig("Cannot compute influence gap: missing liar or honest role")
+    gap["influence_gap"] = gap["Liar"] - gap["Honest"]
+    gap = gap.dropna(subset=["influence_gap"])
+    if gap.empty:
+        return _empty_fig("No paired liar/honest influence data found")
+
+    bin_order = [b for b in _LIAR_BIN_ORDER if b in am["liar_share_bin"].values]
+    models = _sorted_models(gap)
+    n_rows = 2
+    n_cols = max(1, math.ceil(len(models) / n_rows))
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(4.5 * n_cols, 4 * n_rows),
+        sharey=True,
+        squeeze=False,
+    )
+
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(models) :]:
+        ax.set_visible(False)
+
+    visible_axes: list[plt.Axes] = []
+    for idx, model in enumerate(models):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
+        subset = gap[gap["model_short"] == model]
+        sns.barplot(
+            data=subset,
+            x="liar_share_bin",
+            order=bin_order,
+            y="influence_gap",
+            color="#4C72B0",
+            errorbar=("ci", 95),
+            ax=ax,
+        )
+
+        ax.set_title(model, fontsize=10)
+        ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
+        ax.set_ylabel("Influence gap (Liar - Honest)" if col == 0 else "")
+        ax.axhline(0.0, color="0.25", linestyle="--", linewidth=1, alpha=0.8)
+        if ax.get_legend():
+            ax.get_legend().remove()
+        visible_axes.append(ax)
+
+    max_abs = float(gap["influence_gap"].abs().max())
+    ylim = max(0.1, max_abs * 1.15)
+    for ax in visible_axes:
+        ax.set_ylim(-ylim, ylim)
+
+    fig.tight_layout()
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Figure 5 – Honest-agent payoff table (text)
 # ---------------------------------------------------------------------------
@@ -1073,7 +1177,7 @@ def fig_parameter_heatmap(data: SweepData) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Figure 7 – Consensus rate and report entropy dynamics
+# Figure 7 – Consensus rate dynamics
 # ---------------------------------------------------------------------------
 
 
@@ -1152,6 +1256,7 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
                 hue_order=bin_order,
                 palette=_LIAR_SHARE_PALETTE,
                 errorbar=("ci", 95),
+                dense=True,
             )
 
             ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
@@ -1229,6 +1334,7 @@ def fig_coordination_over_rounds(data: SweepData) -> plt.Figure:
             hue_order=bin_order,
             palette=_LIAR_SHARE_PALETTE,
             errorbar=("ci", 95),
+            dense=True,
         )
         ax.set_title(model, fontsize=10)
         ax.set_xlabel("Round" if row == n_rows - 1 else "")
@@ -1299,6 +1405,7 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
             hue_order=bin_order,
             palette=_LIAR_SHARE_PALETTE,
             errorbar=("ci", 95),
+            dense=True,
         )
         ax.set_title(model, fontsize=10)
         ax.set_xlabel("Speaking position" if row == n_rows - 1 else "")
@@ -1684,7 +1791,7 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         "Coordination Success vs. Liar Fraction",
         fig_coordination_vs_liar_share,
     ),
-    "1_highlight": (
+    "fig1_highlight": (
         "Figure 1 Highlight (N=5, M=3)",
         fig1_highlight,
     ),
@@ -1704,6 +1811,10 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         "Liar Influence (Binned Liar Fraction)",
         fig_liar_influence,
     ),
+    "fig4_alternate": (
+        "Liar-Honest Influence Gap",
+        fig4_alternate,
+    ),
     "fig5_payoffs": (
         "Honest-agent payoff table",
         fig5_honest_payoff_table,
@@ -1713,7 +1824,7 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         fig_parameter_heatmap,
     ),
     "fig7_consensus_entropy": (
-        "Consensus & Entropy Dynamics",
+        "Consensus Dynamics",
         fig_consensus_entropy,
     ),
     "fig9_coordination_dynamics": (
@@ -1740,11 +1851,12 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
 
 _NON_ABLATION_FIGURE_KEYS = {
     "fig1_coordination",
-    "1_highlight",
+    "fig1_highlight",
     "fig2_accuracy_confidence",
     "fig2_alternate",
     "fig3_calibration",
     "fig4_influence",
+    "fig4_alternate",
     "fig5_payoffs",
     "fig6_heatmap",
     "fig7_consensus_entropy",

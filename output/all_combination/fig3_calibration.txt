@@ -1,0 +1,12 @@
+# Fig 3 — Expected Calibration Error (Honest Agents)
+
+Expected calibration error computed over confidence bins (8 equal-width bins on [0, 1]).
+
+               model_short    ece  samples  bins_used
+ernie-5.0-thinking-preview 0.0284      207          5
+       deepseek-v3.2-think 0.0410      207          5
+                gpt-5-mini 0.0459      207          6
+                     glm-5 0.0572      207          4
+        gpt-5.2-2025-12-11 0.0790      237          4
+                 kimi-k2.5 0.0961      207          5
+              llama-3.1-8b 0.1186      259          8
