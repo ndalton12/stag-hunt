@@ -411,14 +411,14 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
             sort=False,
         )
 
-        # Add vertical cutoff line at m/n
-        cutoff = threshold / n_agents
+        # Add vertical cutoff line at 1 - m/n
+        cutoff = 1 - threshold / n_agents
         ax.axvline(
             x=cutoff,
             linestyle="--",
             color="black",
             alpha=0.6,
-            label="M/N threshold",
+            label="1 - M/N threshold",
         )
         row, col = divmod(idx, n_cols)
         ax.set_title(f"N={n_agents}, M={threshold}", fontsize=10)
@@ -436,6 +436,71 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
     _add_figure_legend(
         fig,
         first_visible,
+        title="Model",
+        bbox_to_anchor=(1.01, 0.5),
+        loc="center left",
+        frameon=True,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def fig1_highlight(data: SweepData) -> plt.Figure:
+    """Figure 1 highlight: coordination vs liar fraction for N=5, M=3 only."""
+    rm = data.round_metrics
+
+    run_agg = (
+        rm.groupby(
+            [
+                "run_id",
+                "model_short",
+                "num_agents",
+                "liar_share",
+                "stag_success_threshold",
+            ]
+        )
+        .agg(stag_success_rate=("stag_success", "mean"))
+        .reset_index()
+    )
+
+    subset = run_agg[
+        (run_agg["num_agents"] == 5) & (run_agg["stag_success_threshold"] == 3)
+    ].copy()
+    if subset.empty:
+        return _empty_fig("No data found for highlight setting N=5, M=3")
+
+    subset = subset.sort_values("liar_share")
+    models = _sorted_models(subset)
+
+    fig, ax = plt.subplots(1, 1, figsize=_FIG_SINGLE)
+    _lineplot_with_errorbars(
+        ax=ax,
+        data=subset,
+        x="liar_share",
+        y="stag_success_rate",
+        hue="model_short",
+        hue_order=models,
+        palette=_MODEL_PALETTE,
+        errorbar=("ci", 95),
+        sort=False,
+    )
+
+    ax.axvline(
+        x=(1 - 3 / 5),
+        linestyle="--",
+        color="black",
+        alpha=0.6,
+        label="1 - M/N threshold",
+    )
+    ax.set_title("N=5, M=3", fontsize=10)
+    ax.set_xlabel("Liar fraction")
+    ax.set_ylabel("Stag success rate")
+    ax.set_ylim(-0.05, 1.05)
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
+    ax.xaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+    _add_figure_legend(
+        fig,
+        ax,
         title="Model",
         bbox_to_anchor=(1.01, 0.5),
         loc="center left",
@@ -511,6 +576,82 @@ def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
         fig,
         axes[0, 0],
         title="Liar fraction",
+        bbox_to_anchor=(1.01, 0.5),
+        loc="center left",
+        frameon=True,
+    )
+    fig.tight_layout()
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 2 (alternate) – Combined models on one figure
+# ---------------------------------------------------------------------------
+
+
+def fig2_alternate(data: SweepData) -> plt.Figure:
+    """Combined-model view of Figure 2.
+
+    Rows = metrics (accuracy, confidence), columns = liar-fraction bins.
+    Each panel overlays all models so cross-model comparisons are direct.
+    """
+    rm = _multi_round_filter(data.round_metrics)
+    if rm.empty:
+        return _empty_fig("No multi-round runs found")
+
+    models = _sorted_models(rm)
+    bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
+    if not bin_order:
+        return _empty_fig("No liar-fraction bins available")
+
+    metrics = [
+        ("honest_accuracy", "Honest-agent accuracy"),
+        ("confidence_mean", "Mean confidence"),
+    ]
+    n_rows = len(metrics)
+    n_cols = len(bin_order)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(4.5 * n_cols, 4 * n_rows),
+        sharey="row",
+        squeeze=False,
+    )
+
+    for row, (metric_col, metric_label) in enumerate(metrics):
+        for col, bin_label in enumerate(bin_order):
+            ax = axes[row, col]
+            subset = rm[rm["liar_share_bin"] == bin_label]
+            _lineplot_with_errorbars(
+                ax=ax,
+                data=subset,
+                x="round",
+                y=metric_col,
+                hue="model_short",
+                hue_order=models,
+                palette=_MODEL_PALETTE,
+                errorbar=("ci", 95),
+            )
+            if row == 0:
+                ax.set_title(f"Liar fraction {bin_label}", fontsize=10)
+            ax.set_xlabel("Round" if row == n_rows - 1 else "")
+            ax.set_ylabel(metric_label if col == 0 else "")
+            ax.set_ylim(-0.05, 1.05)
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+            if ax.get_legend():
+                ax.get_legend().remove()
+
+    # Zoom confidence row: values cluster in upper range, so a full [0,1]
+    # axis wastes space and masks model separation.
+    conf_col = rm["confidence_mean"].dropna()
+    if not conf_col.empty and len(metrics) > 1:
+        conf_min = max(0.0, float(conf_col.quantile(0.01)) - 0.05)
+        axes[1, 0].set_ylim(conf_min, 1.02)
+
+    _add_figure_legend(
+        fig,
+        axes[0, 0],
+        title="Model",
         bbox_to_anchor=(1.01, 0.5),
         loc="center left",
         frameon=True,
@@ -722,17 +863,25 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
 
     bin_order = [b for b in _LIAR_BIN_ORDER if b in am["liar_share_bin"].values]
     models = _sorted_models(am)
+    n_rows = 2
+    n_cols = max(1, math.ceil(len(models) / n_rows))
 
     fig, axes = plt.subplots(
-        1,
-        len(models),
-        figsize=_FIG_WIDE,
+        n_rows,
+        n_cols,
+        figsize=(4.5 * n_cols, 4 * n_rows),
         sharey=True,
         squeeze=False,
     )
 
-    for col, model in enumerate(models):
-        ax = axes[0, col]
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(models) :]:
+        ax.set_visible(False)
+
+    visible_axes: list[plt.Axes] = []
+    for idx, model in enumerate(models):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
         subset = am[am["model_short"] == model]
         sns.barplot(
             data=subset,
@@ -746,15 +895,16 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
             ax=ax,
         )
         ax.set_title(model, fontsize=10)
-        ax.set_xlabel("Liar fraction")
+        ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
         ax.set_ylabel("Influence on later agents" if col == 0 else "")
         ax.set_ylim(0, 1.05)
         if ax.get_legend():
             ax.get_legend().remove()
+        visible_axes.append(ax)
 
     _add_figure_legend(
         fig,
-        axes[0, 0],
+        visible_axes[0],
         title="Role",
         bbox_to_anchor=(1.01, 0.5),
         loc="center left",
@@ -966,7 +1116,10 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
         how="left",
     )
 
-    thresholds = sorted(rm["stag_success_threshold"].unique())
+    thresholds = [t for t in sorted(rm["stag_success_threshold"].unique()) if t in (3, 4)]
+    if not thresholds:
+        return _empty_fig("No data found for M=3 or M=4 in consensus plot")
+    rm = rm[rm["stag_success_threshold"].isin(thresholds)].copy()
     models = _sorted_models(rm)
     bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
 
@@ -1047,17 +1200,25 @@ def fig_coordination_over_rounds(data: SweepData) -> plt.Figure:
 
     models = _sorted_models(rm)
     bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
+    n_rows = 2
+    n_cols = max(1, math.ceil(len(models) / n_rows))
 
     fig, axes = plt.subplots(
-        1,
-        len(models),
-        figsize=_FIG_WIDE,
+        n_rows,
+        n_cols,
+        figsize=(4.5 * n_cols, 4 * n_rows),
         sharey=True,
         squeeze=False,
     )
 
-    for col, model in enumerate(models):
-        ax = axes[0, col]
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(models) :]:
+        ax.set_visible(False)
+
+    visible_axes: list[plt.Axes] = []
+    for idx, model in enumerate(models):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
         subset = rm[rm["model_short"] == model]
         _lineplot_with_errorbars(
             ax=ax,
@@ -1070,16 +1231,17 @@ def fig_coordination_over_rounds(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
         )
         ax.set_title(model, fontsize=10)
-        ax.set_xlabel("Round")
+        ax.set_xlabel("Round" if row == n_rows - 1 else "")
         ax.set_ylabel("Stag success rate" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         if ax.get_legend():
             ax.get_legend().remove()
+        visible_axes.append(ax)
 
     _add_figure_legend(
         fig,
-        axes[0, 0],
+        visible_axes[0],
         title="Liar fraction",
         bbox_to_anchor=(1.01, 0.5),
         loc="center left",
@@ -1108,17 +1270,25 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
 
     models = _sorted_models(honest)
     bin_order = [b for b in _LIAR_BIN_ORDER if b in honest["liar_share_bin"].values]
+    n_rows = 2
+    n_cols = max(1, math.ceil(len(models) / n_rows))
 
     fig, axes = plt.subplots(
-        1,
-        len(models),
-        figsize=_FIG_WIDE,
+        n_rows,
+        n_cols,
+        figsize=(4.5 * n_cols, 4 * n_rows),
         sharey=True,
         squeeze=False,
     )
 
-    for col, model in enumerate(models):
-        ax = axes[0, col]
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(models) :]:
+        ax.set_visible(False)
+
+    visible_axes: list[plt.Axes] = []
+    for idx, model in enumerate(models):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
         subset = honest[honest["model_short"] == model]
         _lineplot_with_errorbars(
             ax=ax,
@@ -1131,7 +1301,7 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
         )
         ax.set_title(model, fontsize=10)
-        ax.set_xlabel("Speaking position")
+        ax.set_xlabel("Speaking position" if row == n_rows - 1 else "")
         ax.set_ylabel("Honest-agent accuracy" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
@@ -1141,10 +1311,11 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
         )
         if ax.get_legend():
             ax.get_legend().remove()
+        visible_axes.append(ax)
 
     _add_figure_legend(
         fig,
-        axes[0, 0],
+        visible_axes[0],
         title="Liar fraction",
         bbox_to_anchor=(1.01, 0.5),
         loc="center left",
@@ -1513,12 +1684,20 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         "Coordination Success vs. Liar Fraction",
         fig_coordination_vs_liar_share,
     ),
+    "1_highlight": (
+        "Figure 1 Highlight (N=5, M=3)",
+        fig1_highlight,
+    ),
     "fig2_accuracy_confidence": (
         "Honest-Agent Accuracy & Confidence Over Rounds",
         fig_accuracy_over_rounds,
     ),
+    "fig2_alternate": (
+        "Figure 2 Alternate (Combined Models)",
+        fig2_alternate,
+    ),
     "fig3_calibration": (
-        "Expected Calibration Error (table)",
+        "Expected Calibration Error",
         fig3_ece_table,
     ),
     "fig4_influence": (
@@ -1561,7 +1740,9 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
 
 _NON_ABLATION_FIGURE_KEYS = {
     "fig1_coordination",
+    "1_highlight",
     "fig2_accuracy_confidence",
+    "fig2_alternate",
     "fig3_calibration",
     "fig4_influence",
     "fig5_payoffs",
