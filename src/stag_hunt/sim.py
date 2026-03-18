@@ -12,6 +12,20 @@ Built on flashlite's MultiAgentChat:
 - "Lying" is implemented by programmatically flipping reported_action
   and patching the public transcript
 
+Belief model (beliefs.py) integration:
+- q* is computed ONCE at simulation init from fixed game parameters (§3.2).
+  It is a config-level constant, not a round-level variable.
+- Per-turn belief fields (alpha, q_hat, q_corrected, rational_action) are
+  computed as an ANALYTICAL BENCHMARK alongside LLM decisions — they do not
+  drive agent behaviour.  The LLM speaks first; the benchmark is evaluated
+  after the fact to assess payoff-rationality.
+- Round 1 is handled specially: when an agent has seen zero prior reports,
+  q_hat and q_corrected are undefined (returned as None).  The §3.3 revealed-
+  belief inference (infer_first_round_belief) is used instead.
+- matches_rational compares the agent's ORIGINAL (pre-lying) action against
+  the benchmark prediction. Public (post-lying) action and realized payoff
+  are tracked separately.
+
 To run:
     uv run python -m stag_hunt.sim
 """
@@ -36,6 +50,12 @@ from flashlite import (
 from flashlite.observability import convert_flashlite_logs_to_inspect
 from pydantic import BaseModel, Field
 
+from stag_hunt.beliefs import (
+    compute_belief,
+    compute_q_star,
+    compute_rational_action,
+    infer_first_round_belief,
+)
 from stag_hunt.results import (
     SharedCSVPaths,
     append_csv_results,
@@ -106,11 +126,11 @@ class GameConfig:
         if not 0 <= self.num_liars <= self.num_agents:
             raise ValueError("num_liars must be between 0 and num_agents")
 
-        # Enforce standard Stag Hunt ordering:
-        # u(Stag,Stag) > u(Hare,Hare) > u(Hare,Stag) > u(Stag,Hare)
-        # Mapped to this N-player parameterization as:
-        # payoff_stag_success > payoff_hare_fail >
-        # payoff_hare_when_stag_success > payoff_stag_fail
+        # Enforce standard Stag Hunt payoff ordering (n-player parameterisation):
+        #   payoff_stag_success > payoff_hare_fail >= payoff_hare_when_stag_success
+        #   > payoff_stag_fail
+        # The >= on the middle comparison allows payoff_hare_fail ==
+        # payoff_hare_when_stag_success, which is a valid degenerate case.
         if not (
             self.payoff_stag_success
             > self.payoff_hare_fail
@@ -119,7 +139,7 @@ class GameConfig:
         ):
             raise ValueError(
                 "Invalid payoffs: require "
-                "payoff_stag_success > payoff_hare_fail > "
+                "payoff_stag_success > payoff_hare_fail >= "
                 "payoff_hare_when_stag_success > payoff_stag_fail"
             )
 
@@ -176,6 +196,19 @@ class StagHuntSimulation:
     - Lying is applied post-hoc: the signal is flipped, a new justification
       is generated via the ``justify_lie`` template, and the public
       transcript entry is patched so subsequent agents see the flipped version.
+
+    Belief model:
+    - ``self.q_star`` is computed once at init from fixed game parameters.
+      It is a game-level constant (§3.2), not a per-round variable.
+    - Per-turn fields (q_hat, q_corrected, rational_action) are computed in
+      run_round() as an analytical benchmark — not as agent policy.
+
+    Note on adversary_ablation == "b3":
+    - In b3 mode liars randomly re-sample their public action rather than
+      deterministically flipping it.  The α-correction in beliefs.py assumes
+      a symmetric corruption model (fixed flip probability), which is only
+      an approximation under b3.  Benchmark fields should be interpreted with
+      this caveat in mind when analysing b3 runs.
     """
 
     def __init__(
@@ -203,6 +236,17 @@ class StagHuntSimulation:
             run_id_override=run_id_override,
         )
         self._setup_agents()
+
+        # §3.2 — q* is a game-level constant determined entirely by fixed
+        # structural parameters.  Compute it once here so run_round() can
+        # read it directly without recomputing on every turn.
+        self.q_star: float = compute_q_star(
+            num_agents=self.config.num_agents,
+            threshold_m=self._resolve_stag_success_threshold(),
+            payoff_stag_success=self.config.payoff_stag_success,
+            payoff_stag_fail=self.config.payoff_stag_fail,
+            payoff_hare_safe=self.config.payoff_hare_fail,
+        )
 
     # -- Setup -------------------------------------------------------------
 
@@ -357,16 +401,10 @@ class StagHuntSimulation:
         input_messages: list[dict],
         decision: AgentDecision,
     ) -> None:
-        """Log a single agent turn so Inspect shows each agent's perspective.
-
-        ``input_messages`` should be captured *before* ``speak()`` so they
-        reflect exactly what the agent saw when making its decision.
-        ``decision`` is the structured output returned directly by ``speak()``.
-        """
+        """Log a single agent turn so Inspect shows each agent's perspective."""
         if self.logger is None:
             return
 
-        # Metadata (model, token counts) lives on the transcript entry
         last_msg = self.chat.transcript[-1]
         meta = last_msg.metadata
 
@@ -416,7 +454,31 @@ class StagHuntSimulation:
     # -- Round execution ---------------------------------------------------
 
     async def run_round(self, round_num: int) -> list[dict]:
-        """Run a single round: announce round, collect decisions, apply lying."""
+        """Run a single round: announce round, collect decisions, apply lying.
+
+        Belief benchmark fields recorded per turn (§3–§3.3):
+        ─────────────────────────────────────────────────────
+        alpha               Signal reliability (N−F)/N.  §3.1
+        k_stag_seen         Number of public STAG reports seen before speaking.
+        n_observed          Number of agents who spoke before this agent.
+        q_hat               Raw uncorrected belief (None in round 1, turn 0).  §3.1
+        q_corrected         α-corrected belief (None in round 1, turn 0).  §3.1
+        q_star              Rational cooperation threshold (game constant).  §3.2
+        rational_action     Theory's best response given q_corrected.
+                            None when q_corrected is unavailable (round 1, turn 0).
+        matches_rational    Whether the agent's ORIGINAL (pre-lying) action equals
+                            rational_action.  None when rational_action is None.
+                            NOTE: payoffs are settled on public (post-lying) action;
+                            matches_rational reflects internal rationality only.
+        revealed_belief_region
+                            §3.3 set-identification of latent belief in round 1.
+                            None in subsequent rounds.
+
+        Note on k_stag_seen / q_hat:
+            These reflect the *publicly reported* STAG count (which includes
+            adversarially flipped signals), not the true cooperation rate.
+            This matches what agents actually observe in the transcript.
+        """
         print(f"\n{'=' * 60}")
         print(f"ROUND {round_num}")
         print("=" * 60)
@@ -424,33 +486,78 @@ class StagHuntSimulation:
         self._inject_round_signals(round_num)
 
         round_results: list[dict] = []
+        threshold_m = self._resolve_stag_success_threshold()
+
+        # Running count of *publicly reported* STAG actions so far this round.
+        # Updated from public_decision (post-lying) so it mirrors what each
+        # subsequent agent actually sees in the transcript.
+        stag_seen_count = 0
 
         speaking_order = self._ordered_roles_for_round()
         for idx, role in enumerate(speaking_order):
-            # Snapshot the agent's message view *before* they speak
+            # Snapshot belief-relevant counts BEFORE this agent speaks.
+            k_i = stag_seen_count  # STAG reports visible to this agent
+            n_observed = idx       # agents who have already spoken
+
             input_messages = self.chat.get_messages_for(role.name)
 
-            # Agent speaks — structured output automatically validated
             decision: AgentDecision = await self.chat.speak(
                 role.name,
                 response_model=AgentDecision,
                 temperature=1.0,
             )
 
-            # Log the turn (captures each agent's unique perspective)
             sample_id = (round_num - 1) * len(self.roles) + idx
 
-            # Apply programmatic lying (flips action + regenerates justification)
             public_decision = await self._apply_lying(role, decision)
             was_flipped = decision.reported_action != public_decision.reported_action
 
-            # Patch the public transcript so subsequent agents always see
-            # an explicit speaker prefix and any applied corruption.
             self._patch_transcript(role, public_decision)
-
             self._log_agent_turn(
                 role, round_num, sample_id, input_messages, public_decision
             )
+
+            # -- §3.1 Belief update ----------------------------------------
+            # compute_belief returns (alpha, None, None) when n_observed == 0
+            # (first speaker has seen no reports).
+            alpha, q_hat, q_corrected = compute_belief(
+                k_stag=k_i,
+                n_observed=n_observed,
+                num_agents=self.config.num_agents,
+                num_liars=self.config.num_liars,
+            )
+
+            # -- §3.2 Rational action benchmark ----------------------------
+            # Only defined when q_corrected is available.
+            rational: str | None = None
+            matches_rational: bool | None = None
+            if q_corrected is not None:
+                rational = compute_rational_action(
+                    q=q_corrected,
+                    num_agents=self.config.num_agents,
+                    threshold_m=threshold_m,
+                    payoff_stag_success=self.config.payoff_stag_success,
+                    payoff_stag_fail=self.config.payoff_stag_fail,
+                    payoff_hare_safe=self.config.payoff_hare_fail,
+                )
+                # Compare ORIGINAL (internal) action, not the public (post-lying) one.
+                # Payoff fields use public_decision; these are intentionally separate.
+                matches_rational = decision.reported_action == rational
+
+            # -- §3.3 Revealed-belief inference (round 1 only) -------------
+            # The first speaker (idx==0) has no observable prior — their belief
+            # is unobservable regardless of round number.
+            # We record the §3.3 inference in round 1 for ALL agents, since
+            # the paper characterises initial priors via first-round behaviour.
+            revealed_belief_region: str | None = None
+            if round_num == 1:
+                revealed = infer_first_round_belief(decision.reported_action, self.q_star)
+                revealed_belief_region = revealed["inferred_belief_region"]
+
+            # Update the running STAG count from the PUBLIC decision so that
+            # the next agent sees the same information as in the transcript.
+            if public_decision.reported_action == "STAG":
+                stag_seen_count += 1
 
             result = {
                 "run_id": self.run.run_id,
@@ -459,26 +566,47 @@ class StagHuntSimulation:
                 "round": round_num,
                 "turn_index": idx,
                 "is_liar": role.is_liar,
+                # Internal (original, pre-lying) action
                 "original_action": decision.reported_action,
                 "original_is_stag": decision.reported_action == "STAG",
+                # Public (post-lying) action — what the transcript shows
                 "reported_action": public_decision.reported_action,
                 "reported_is_stag": public_decision.reported_action == "STAG",
                 "was_flipped": was_flipped,
                 "confidence": public_decision.confidence,
                 "justification": public_decision.justification,
+                # -- Analytical belief benchmark (§3–§3.3) -----------------
+                # These are NOT the LLM's internal beliefs; they are computed
+                # from the observable transcript under the Bayesian model.
+                "alpha": alpha,
+                "k_stag_seen": k_i,
+                "n_observed": n_observed,
+                "q_hat": q_hat,                        # None if n_observed == 0
+                "q_corrected": q_corrected,            # None if n_observed == 0
+                "q_star": self.q_star,                 # game constant, same every row
+                "rational_action": rational,           # None if q_corrected is None
+                "matches_rational": matches_rational,  # None if rational is None
+                "revealed_belief_region": revealed_belief_region,  # round 1 only
             }
             round_results.append(result)
 
-            # Print result
+            # Print — show q_corrected when available, otherwise mark as unobserved
             liar_tag = " [LIAR]" if role.is_liar else ""
             flip_tag = " (FLIPPED)" if was_flipped else ""
+            if rational is not None:
+                bench_tag = " [RATIONAL]" if matches_rational else " [IRRATIONAL]"
+                belief_str = f"q={q_corrected:.2f}, q*={self.q_star:.2f}"
+            else:
+                bench_tag = " [NO PRIOR]"
+                belief_str = f"q=n/a, q*={self.q_star:.2f}"
             print(
-                f"  {role.name}{liar_tag}: {public_decision.reported_action}{flip_tag} "
-                f"(conf: {public_decision.confidence:.2f}) — "
+                f"  {role.name}{liar_tag}: {public_decision.reported_action}"
+                f"{flip_tag}{bench_tag} "
+                f"({belief_str}, conf={public_decision.confidence:.2f}) — "
                 f'"{public_decision.justification}"'
             )
 
-        threshold_m = self._resolve_stag_success_threshold()
+        # -- Payoff settlement (on public / reported actions) ---------------
         num_stag = sum(1 for r in round_results if r["reported_is_stag"])
         stag_success = num_stag >= threshold_m
         for result in round_results:
@@ -498,9 +626,11 @@ class StagHuntSimulation:
             result["stag_success"] = stag_success
             result["stag_success_threshold"] = threshold_m
             result["num_stag_reported"] = num_stag
-            # Correct = agent chose the dominant action given the outcome:
-            # STAG when stag succeeded, or HARE when stag failed.
-            result["is_correct"] = result["reported_is_stag"] == stag_success
+            # is_outcome_aligned: did the agent's PUBLIC action match the
+            # ex-post optimal choice?  (STAG when stag succeeded; HARE when it
+            # failed.)  This is an outcome-contingent measure, NOT a rationality
+            # measure — use matches_rational for theory alignment.
+            result["is_outcome_aligned"] = result["reported_is_stag"] == stag_success
 
         self.round_data.append(
             {
@@ -508,6 +638,7 @@ class StagHuntSimulation:
                 "stag_success_threshold": threshold_m,
                 "num_stag_reported": num_stag,
                 "stag_success": stag_success,
+                "q_star": self.q_star,
                 "results": round_results,
             }
         )
@@ -537,6 +668,7 @@ class StagHuntSimulation:
             f"stag_fail[STAG={self.config.payoff_stag_fail}, "
             f"HARE={self.config.payoff_hare_fail}]"
         )
+        print(f"Rational threshold q*: {self.q_star:.4f}")
         print(f"Seed: {self.config.seed}")
         print(f"Run ID: {self.run.run_id}")
         print(f"Git commit: {self.run.git_commit}")
@@ -556,26 +688,47 @@ class StagHuntSimulation:
         print("ANALYSIS")
         print("=" * 60)
 
-        total_correct = 0
         total_decisions = 0
-        liar_correct = 0
+        outcome_aligned = 0
+        liar_outcome_aligned = 0
         liar_total = 0
+        rational_matches = 0
+        rational_eligible = 0  # turns where rational_action was defined
 
         for rd in self.round_data:
             for result in rd["results"]:
                 total_decisions += 1
-                if result["is_correct"]:
-                    total_correct += 1
+                if result["is_outcome_aligned"]:
+                    outcome_aligned += 1
                 if result["is_liar"]:
                     liar_total += 1
-                    if result["is_correct"]:
-                        liar_correct += 1
+                    if result["is_outcome_aligned"]:
+                        liar_outcome_aligned += 1
+                if result.get("matches_rational") is not None:
+                    rational_eligible += 1
+                    if result["matches_rational"]:
+                        rational_matches += 1
 
-        accuracy = total_correct / total_decisions if total_decisions else 0
-        liar_accuracy = liar_correct / liar_total if liar_total else 0
+        outcome_alignment_rate = outcome_aligned / total_decisions if total_decisions else 0
+        liar_outcome_alignment_rate = (
+            liar_outcome_aligned / liar_total if liar_total else 0
+        )
+        rationality_rate = (
+            rational_matches / rational_eligible if rational_eligible else 0
+        )
 
-        print(f"Overall accuracy (chose dominant action): {accuracy:.1%}")
-        print(f"Liar accuracy (chose dominant action): {liar_accuracy:.1%}")
+        print(
+            f"Outcome alignment rate (public action matched ex-post outcome): "
+            f"{outcome_alignment_rate:.1%}"
+        )
+        print(
+            f"Liar outcome alignment rate: {liar_outcome_alignment_rate:.1%}"
+        )
+        print(
+            f"Payoff-rationality rate (original action matched q* benchmark, "
+            f"turns with prior reports only): {rationality_rate:.1%} "
+            f"({rational_matches}/{rational_eligible})"
+        )
         print(f"Total decisions: {total_decisions}")
         if total_decisions:
             avg_payoff = (
@@ -588,13 +741,11 @@ class StagHuntSimulation:
             )
             print(f"Average realized payoff per decision: {avg_payoff:.3f}")
 
-        # Print conversation stats from MultiAgentChat
         stats = self.chat.stats
         print(f"Total tokens used: {stats['total_tokens']}")
         round_metrics = build_round_metric_rows(self.round_data, self.run)
         agent_summary = build_agent_summary_rows(self.round_data, self.roles, self.run)
 
-        # Use append mode for shared CSV files (sweep), or write mode for standalone
         export_kwargs = {
             "round_data": self.round_data,
             "run": self.run,
@@ -613,8 +764,8 @@ class StagHuntSimulation:
             "payoff_hare_when_stag_success": self.config.payoff_hare_when_stag_success,
             "payoff_stag_fail": self.config.payoff_stag_fail,
             "payoff_hare_fail": self.config.payoff_hare_fail,
-            "accuracy": accuracy,
-            "liar_accuracy": liar_accuracy,
+            "accuracy": outcome_alignment_rate,
+            "liar_accuracy": liar_outcome_alignment_rate,
         }
 
         if self.shared_csv_paths is not None:
@@ -633,8 +784,9 @@ class StagHuntSimulation:
 
         return {
             "rounds": self.round_data,
-            "accuracy": accuracy,
-            "liar_accuracy": liar_accuracy,
+            "outcome_alignment_rate": outcome_alignment_rate,
+            "liar_outcome_alignment_rate": liar_outcome_alignment_rate,
+            "rationality_rate": rationality_rate,
             "total_decisions": total_decisions,
             "chat_stats": stats,
             "round_metrics": round_metrics,
@@ -657,7 +809,6 @@ async def main():
         rate_limit=RateLimitConfig(requests_per_minute=30, tokens_per_minute=20000),
     )
 
-    # Inspect-compatible logging — each agent's perspective is recorded
     logger = InspectLogger(
         log_dir="./logs",
         eval_prefix="stag_hunt_simulation",
