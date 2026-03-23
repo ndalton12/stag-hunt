@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from scipy.stats import binom
 
-
 # ============================================================================
 # §3.1  Signal reliability and belief update
 # ============================================================================
@@ -119,6 +118,7 @@ def compute_q_star(
       • q* = 0.0  — Stag is dominant even at the lowest possible belief.
       • q* = 1.0  — Hare always dominates.
     """
+
     def f(q: float) -> float:
         return (
             expected_payoff_stag(
@@ -222,23 +222,35 @@ def q_star_sensitivity(
     dM_sign: int | None = None
     if threshold_m < num_agents:
         q_m = compute_q_star(
-            num_agents, threshold_m + 1, payoff_stag_success, payoff_stag_fail, payoff_hare_safe
+            num_agents,
+            threshold_m + 1,
+            payoff_stag_success,
+            payoff_stag_fail,
+            payoff_hare_safe,
         )
         dM_sign = 1 if q_m > q0 else (-1 if q_m < q0 else 0)
 
     q_rs = compute_q_star(
-        num_agents, threshold_m, payoff_stag_success + eps, payoff_stag_fail, payoff_hare_safe
+        num_agents,
+        threshold_m,
+        payoff_stag_success + eps,
+        payoff_stag_fail,
+        payoff_hare_safe,
     )
     dRS_sign = 1 if q_rs > q0 else (-1 if q_rs < q0 else 0)
 
     q_h = compute_q_star(
-        num_agents, threshold_m, payoff_stag_success, payoff_stag_fail, payoff_hare_safe + eps
+        num_agents,
+        threshold_m,
+        payoff_stag_success,
+        payoff_stag_fail,
+        payoff_hare_safe + eps,
     )
     dH_sign = 1 if q_h > q0 else (-1 if q_h < q0 else 0)
 
     return {
         "q_star": q0,
-        "dq_star_dM_sign": dM_sign,    # expected +1
+        "dq_star_dM_sign": dM_sign,  # expected +1
         "dq_star_dRS_sign": dRS_sign,  # expected -1
-        "dq_star_dH_sign": dH_sign,    # expected +1
+        "dq_star_dH_sign": dH_sign,  # expected +1
     }

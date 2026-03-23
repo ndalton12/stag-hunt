@@ -12,6 +12,7 @@ dependencies = [
     "huggingface-hub>=1.4.0",
     "matplotlib>=3.10.8",
     "pandas>=3.0.1",
+    "scipy>=1.17.1",
     "seaborn>=0.13.2",
 ]
 

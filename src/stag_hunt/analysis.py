@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass
+from matplotlib.lines import Line2D
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -687,6 +688,156 @@ def fig2_alternate(data: SweepData) -> plt.Figure:
     return fig
 
 
+def fig2_alternate_b(data: SweepData) -> plt.Figure:
+    """Focused combined-model view emphasising confident error.
+
+    This variant keeps all liar-fraction bins for consistency with the rest of
+    the paper, but visually de-emphasises per-model traces by pushing them into
+    the background and highlighting the across-model mean.
+    """
+    rm = _multi_round_filter(data.round_metrics)
+    if rm.empty:
+        return _empty_fig("No multi-round runs found")
+
+    am = data.agent_metrics.copy()
+    if am.empty or "confidence" not in am.columns or "is_liar" not in am.columns:
+        return _empty_fig("No agent-level confidence data found")
+    am = am[~_as_bool(am["is_liar"])].copy()
+    if am.empty:
+        return _empty_fig("No honest-agent confidence data found")
+
+    honest_conf = (
+        am.groupby(["run_id", "round"], observed=False)
+        .agg(honest_confidence_mean=("confidence", "mean"))
+        .reset_index()
+    )
+    rm = rm.copy().merge(honest_conf, on=["run_id", "round"], how="left")
+    rm = rm.dropna(subset=["honest_confidence_mean"]).copy()
+    if rm.empty:
+        return _empty_fig("No matched honest-confidence data found")
+    rm["confidence_gap"] = rm["honest_confidence_mean"] - rm["honest_accuracy"]
+
+    models = _sorted_models(rm)
+    bin_order = [b for b in _LIAR_BIN_ORDER if b in rm["liar_share_bin"].values]
+    if not bin_order:
+        return _empty_fig("No liar-fraction bins available")
+
+    metrics = [
+        ("honest_accuracy", "Honest-agent accuracy"),
+        ("confidence_gap", "Honest confidence - accuracy"),
+    ]
+    fig, axes = plt.subplots(
+        len(metrics),
+        len(bin_order),
+        figsize=(4.6 * len(bin_order), 4 * len(metrics)),
+        sharey="row",
+        squeeze=False,
+    )
+    row_mins = [float("inf")] * len(metrics)
+    row_maxs = [float("-inf")] * len(metrics)
+
+    for row, (metric_col, metric_label) in enumerate(metrics):
+        for col, bin_label in enumerate(bin_order):
+            ax = axes[row, col]
+            subset = rm[
+                (rm["liar_share_bin"] == bin_label) & (rm["model_short"].isin(models))
+            ]
+            if subset.empty:
+                ax.set_visible(False)
+                continue
+
+            per_model = (
+                subset.groupby(["model_short", "round"], observed=False)[metric_col]
+                .mean()
+                .reset_index()
+            )
+            mean_trend = (
+                per_model.groupby("round", observed=False)[metric_col]
+                .mean()
+                .reset_index()
+            )
+
+            # Show individual model trajectories as faint background context.
+            for model in models:
+                model_df = per_model[per_model["model_short"] == model].sort_values(
+                    "round"
+                )
+                if model_df.empty:
+                    continue
+                ax.plot(
+                    model_df["round"],
+                    model_df[metric_col],
+                    color="0.70",
+                    linewidth=1.2,
+                    alpha=0.55,
+                    zorder=1,
+                )
+
+            # Foreground the cross-model mean using the same CI machinery as the
+            # main line figures: seaborn mean estimate with 95% CI bars.
+            sns.lineplot(
+                data=per_model,
+                x="round",
+                y=metric_col,
+                errorbar=("ci", 95),
+                err_style="bars",
+                color="#1f4e79",
+                err_kws={"capsize": 2.5, "elinewidth": 1.2},
+                linewidth=2.6,
+                marker="o",
+                markersize=4.5,
+                zorder=3,
+                ax=ax,
+            )
+
+            local_min = min(
+                float(per_model[metric_col].min()),
+                float(mean_trend[metric_col].min()),
+            )
+            local_max = max(
+                float(per_model[metric_col].max()),
+                float(mean_trend[metric_col].max()),
+            )
+            row_mins[row] = min(row_mins[row], local_min)
+            row_maxs[row] = max(row_maxs[row], local_max)
+
+            if row == 0:
+                ax.set_title(f"{bin_label} liars", fontsize=10)
+            ax.set_xlabel("Round" if row == len(metrics) - 1 else "")
+            ax.set_ylabel(metric_label if col == 0 else "")
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+            if row == 1:
+                ax.axhline(0.0, color="0.25", linestyle="--", linewidth=1, alpha=0.8)
+            if ax.get_legend():
+                ax.get_legend().remove()
+
+    for row, (metric_col, _) in enumerate(metrics):
+        if not np.isfinite(row_mins[row]) or not np.isfinite(row_maxs[row]):
+            continue
+        padding = max(0.03, 0.08 * (row_maxs[row] - row_mins[row]))
+        y_min = row_mins[row] - padding
+        y_max = row_maxs[row] + padding
+        if metric_col == "honest_accuracy":
+            y_min = max(0.0, y_min)
+            y_max = min(1.02, y_max)
+        for col in range(len(bin_order)):
+            axes[row, col].set_ylim(y_min, y_max)
+
+    fig.legend(
+        handles=[
+            Line2D([0], [0], color="#1f4e79", marker="o", linewidth=2.6),
+            Line2D([0], [0], color="0.70", linewidth=1.2, alpha=0.55),
+        ],
+        labels=["Across-model mean", "Individual model"],
+        title="Series",
+        bbox_to_anchor=(1.01, 0.5),
+        loc="center left",
+        frameon=True,
+    )
+    fig.tight_layout()
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Figure 3 – Confidence calibration
 # ---------------------------------------------------------------------------
@@ -1220,7 +1371,9 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
         how="left",
     )
 
-    thresholds = [t for t in sorted(rm["stag_success_threshold"].unique()) if t in (3, 4)]
+    thresholds = [
+        t for t in sorted(rm["stag_success_threshold"].unique()) if t in (3, 4)
+    ]
     if not thresholds:
         return _empty_fig("No data found for M=3 or M=4 in consensus plot")
     rm = rm[rm["stag_success_threshold"].isin(thresholds)].copy()
@@ -1803,6 +1956,10 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         "Figure 2 Alternate (Combined Models)",
         fig2_alternate,
     ),
+    "fig2_alternate_b": (
+        "Figure 2 Alternate B (Focused Confidence Gap)",
+        fig2_alternate_b,
+    ),
     "fig3_calibration": (
         "Expected Calibration Error",
         fig3_ece_table,
@@ -1854,6 +2011,7 @@ _NON_ABLATION_FIGURE_KEYS = {
     "fig1_highlight",
     "fig2_accuracy_confidence",
     "fig2_alternate",
+    "fig2_alternate_b",
     "fig3_calibration",
     "fig4_influence",
     "fig4_alternate",
