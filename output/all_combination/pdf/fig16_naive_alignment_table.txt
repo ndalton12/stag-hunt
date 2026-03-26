@@ -1,0 +1,17 @@
+# Fig 16 — Naive-Aggregate Alignment Table
+
+Main comparison uses honest agents only from base/default runs (a1, base, h1).
+Eligible rows are turns with an observable prior; no-prior rows are excluded from match-rate statistics.
+Total honest observations: 3585
+Eligible observations: 2852
+Excluded no-prior observations: 733
+Near-threshold means $|\hat{q} - q^*| \le 0.1$.
+
+                     Model  Honest obs  Eligible  No-prior Match rate False coop False defect Near-threshold match Correct if match Correct if mismatch Payoff if match Payoff if mismatch
+                gpt-5-mini         479       377       102      0.846      0.354        0.006                1.000            1.000               0.534           3.348              2.172
+        gpt-5.2-2025-12-11         547       416       131      0.832      0.493        0.004                1.000            0.994               0.629           3.590              2.486
+       deepseek-v3.2-think         495       401        94      0.825      0.449        0.000                1.000            0.997               0.586           3.480              2.343
+                     glm-5         495       401        94      0.771      0.597        0.000                1.000            0.997               0.598           3.599              2.391
+ernie-5.0-thinking-preview         495       401        94      0.763      0.631        0.000                0.988            0.997               0.558           3.641              2.253
+                 kimi-k2.5         495       401        94      0.758      0.618        0.010                0.974            0.993               0.443           3.618              1.794
+              llama-3.1-8b         579       455       124      0.563      0.608        0.224                0.471            0.980               0.377           3.406              1.698

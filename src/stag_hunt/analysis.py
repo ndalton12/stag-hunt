@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass
-from matplotlib.lines import Line2D
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -22,6 +21,9 @@ import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.lines import Line2D
+
+from stag_hunt.beliefs import compute_belief, compute_q_star, compute_rational_action
 
 # ---------------------------------------------------------------------------
 # Style constants
@@ -47,6 +49,18 @@ _DEFAULT_LINE_KWS = {
 }
 
 _LIAR_BIN_ORDER = ["0\u201325%", "25\u201350%", "50\u201375%", "75\u2013100%"]
+_BELIEF_MARGIN_BIN_EDGES = np.arange(-0.5, 1.0 + 0.1001, 0.1)
+_BENCHMARK_BASELINE_Q = 0.5
+_BENCHMARK_MEMORY_LAMBDA = 0.5
+_BENCHMARK_PSEUDOCOUNT_TAU = 2.0
+_TRUST_INIT_A = 1.0
+_TRUST_INIT_B = 0.0
+_BENCHMARK_RULE_ORDER = ["Naive aggregate", "Carryover", "Trust-weighted"]
+_BENCHMARK_RULE_COLORS = {
+    "Naive aggregate": "#1f4e79",
+    "Carryover": "#2a9d8f",
+    "Trust-weighted": "#7b3f98",
+}
 
 
 def _short_model(name: str) -> str:
@@ -349,6 +363,389 @@ def _base_only_data(data: SweepData) -> SweepData:
         agent_summary=agent_summary,
         sweep_points=sweep_points,
     )
+
+
+# ---------------------------------------------------------------------------
+# Public-belief benchmark reconstruction
+# ---------------------------------------------------------------------------
+
+
+def build_belief_benchmark(data: SweepData) -> pd.DataFrame:
+    """Reconstruct per-turn public-belief benchmark quantities from sweep CSVs."""
+    am = data.agent_metrics.copy()
+    if am.empty:
+        return pd.DataFrame(
+            columns=[
+                "run_id",
+                "round",
+                "turn_index",
+                "agent",
+                "model_short",
+                "liar_share_bin",
+                "role",
+                "alpha",
+                "k_stag_seen",
+                "n_observed",
+                "q_hat",
+                "q_star",
+                "q_margin",
+                "rational_action",
+                "benchmark_defined",
+                "matches_benchmark",
+                "false_cooperate",
+                "false_defect",
+            ]
+        )
+
+    candidate_run_cols = [
+        "payoff_stag_success",
+        "payoff_stag_fail",
+        "payoff_hare_fail",
+        "stag_success_threshold",
+    ]
+    missing_run_cols = [col for col in candidate_run_cols if col not in am.columns]
+    bench = am.copy()
+    if missing_run_cols:
+        run_params = data.runs[["run_id", *missing_run_cols]].drop_duplicates()
+        bench = bench.merge(run_params, on="run_id", how="left", validate="many_to_one")
+
+    for col in (
+        "reported_is_stag",
+        "original_is_stag",
+        "is_correct",
+        "is_liar",
+        "stag_success",
+    ):
+        if col in bench.columns:
+            bench[col] = _as_bool(bench[col])
+
+    if "role" not in bench.columns and "is_liar" in bench.columns:
+        bench["role"] = _role_label(bench["is_liar"])
+    if "model_short" not in bench.columns and "model" in bench.columns:
+        bench["model_short"] = bench["model"].apply(_short_model)
+    if "liar_share" not in bench.columns:
+        bench["liar_share"] = bench["num_liars"] / bench["num_agents"]
+    if "liar_share_bin" not in bench.columns:
+        bench["liar_share_bin"] = bench["liar_share"].apply(_bin_liar_share)
+
+    bench = bench.sort_values(["run_id", "round", "turn_index", "agent"]).copy()
+    bench["k_stag_seen"] = (
+        bench.groupby(["run_id", "round"], sort=False)["reported_is_stag"]
+        .transform(lambda s: s.astype(int).cumsum().shift(fill_value=0))
+        .astype(int)
+    )
+    bench["n_observed"] = bench["turn_index"].astype(int)
+
+    q_star_cache: dict[tuple[int, int, float, float, float], float] = {}
+    alpha_vals: list[float] = []
+    q_hat_vals: list[float | None] = []
+    q_star_vals: list[float] = []
+    rational_vals: list[str | None] = []
+
+    for row in bench.itertuples(index=False):
+        alpha, q_hat = compute_belief(
+            k_stag=int(row.k_stag_seen),
+            n_observed=int(row.n_observed),
+            num_agents=int(row.num_agents),
+            num_liars=int(row.num_liars),
+        )
+        q_key = (
+            int(row.num_agents),
+            int(row.stag_success_threshold),
+            float(row.payoff_stag_success),
+            float(row.payoff_stag_fail),
+            float(row.payoff_hare_fail),
+        )
+        q_star = q_star_cache.get(q_key)
+        if q_star is None:
+            q_star = compute_q_star(
+                num_agents=q_key[0],
+                threshold_m=q_key[1],
+                payoff_stag_success=q_key[2],
+                payoff_stag_fail=q_key[3],
+                payoff_hare_safe=q_key[4],
+            )
+            q_star_cache[q_key] = q_star
+
+        rational_action = None
+        if q_hat is not None:
+            rational_action = compute_rational_action(
+                q=q_hat,
+                num_agents=int(row.num_agents),
+                threshold_m=int(row.stag_success_threshold),
+                payoff_stag_success=float(row.payoff_stag_success),
+                payoff_stag_fail=float(row.payoff_stag_fail),
+                payoff_hare_safe=float(row.payoff_hare_fail),
+            )
+
+        alpha_vals.append(alpha)
+        q_hat_vals.append(q_hat)
+        q_star_vals.append(q_star)
+        rational_vals.append(rational_action)
+
+    bench["alpha"] = alpha_vals
+    bench["q_hat"] = q_hat_vals
+    bench["q_star"] = q_star_vals
+    bench["q_margin"] = bench["q_hat"] - bench["q_star"]
+    bench["rational_action"] = rational_vals
+    bench["benchmark_defined"] = bench["q_hat"].notna()
+    bench["matches_benchmark"] = bench["benchmark_defined"] & (
+        bench["original_action"] == bench["rational_action"]
+    )
+    bench["false_cooperate"] = (
+        bench["benchmark_defined"]
+        & (bench["q_margin"] < 0)
+        & (bench["original_action"] == "STAG")
+    )
+    bench["false_defect"] = (
+        bench["benchmark_defined"]
+        & (bench["q_margin"] > 0)
+        & (bench["original_action"] == "HARE")
+    )
+    bench["q_margin_clipped"] = bench["q_margin"].clip(
+        lower=_BELIEF_MARGIN_BIN_EDGES[0],
+        upper=_BELIEF_MARGIN_BIN_EDGES[-1],
+    )
+    bench["q_margin_bin"] = pd.cut(
+        bench["q_margin_clipped"],
+        bins=_BELIEF_MARGIN_BIN_EDGES,
+        include_lowest=True,
+        duplicates="drop",
+    )
+    bench["q_margin_mid"] = bench["q_margin_bin"].map(
+        lambda interval: interval.mid if pd.notna(interval) else np.nan
+    )
+    bench["benchmark_rule"] = "Naive aggregate"
+    bench["benchmark_q"] = bench["q_hat"]
+    return bench
+
+
+def _finalize_benchmark_rule(
+    bench: pd.DataFrame,
+    *,
+    q_values: pd.Series,
+    rule_name: str,
+) -> pd.DataFrame:
+    """Attach rule-specific benchmark quantities to a prepared benchmark frame."""
+    out = bench.copy()
+    out["benchmark_rule"] = rule_name
+    out["benchmark_q"] = q_values.reindex(out.index)
+    out["q_margin"] = out["benchmark_q"] - out["q_star"]
+
+    rational_vals: list[str | None] = []
+    for row in out.itertuples(index=False):
+        rational_action = None
+        if pd.notna(row.benchmark_q):
+            rational_action = compute_rational_action(
+                q=float(row.benchmark_q),
+                num_agents=int(row.num_agents),
+                threshold_m=int(row.stag_success_threshold),
+                payoff_stag_success=float(row.payoff_stag_success),
+                payoff_stag_fail=float(row.payoff_stag_fail),
+                payoff_hare_safe=float(row.payoff_hare_fail),
+            )
+        rational_vals.append(rational_action)
+
+    out["rational_action"] = rational_vals
+    out["benchmark_defined"] = out["benchmark_q"].notna()
+    out["matches_benchmark"] = out["benchmark_defined"] & (
+        out["original_action"] == out["rational_action"]
+    )
+    out["false_cooperate"] = (
+        out["benchmark_defined"]
+        & (out["q_margin"] < 0)
+        & (out["original_action"] == "STAG")
+    )
+    out["false_defect"] = (
+        out["benchmark_defined"]
+        & (out["q_margin"] > 0)
+        & (out["original_action"] == "HARE")
+    )
+    out["q_margin_clipped"] = out["q_margin"].clip(
+        lower=_BELIEF_MARGIN_BIN_EDGES[0],
+        upper=_BELIEF_MARGIN_BIN_EDGES[-1],
+    )
+    out["q_margin_bin"] = pd.cut(
+        out["q_margin_clipped"],
+        bins=_BELIEF_MARGIN_BIN_EDGES,
+        include_lowest=True,
+        duplicates="drop",
+    )
+    out["q_margin_mid"] = out["q_margin_bin"].map(
+        lambda interval: interval.mid if pd.notna(interval) else np.nan
+    )
+    return out
+
+
+def build_carryover_benchmark(data: SweepData) -> pd.DataFrame:
+    """Benchmark using a carryover prior from the previous round."""
+    bench = build_belief_benchmark(data)
+    if bench.empty:
+        return bench
+
+    q_values = pd.Series(index=bench.index, dtype=float)
+    for _, run_df in bench.groupby("run_id", sort=False):
+        run_df = run_df.sort_values(["round", "turn_index", "agent"])
+        prev_post = _BENCHMARK_BASELINE_Q
+        first_round = True
+
+        for _, round_df in run_df.groupby("round", sort=True):
+            prior = (
+                _BENCHMARK_BASELINE_Q
+                if first_round
+                else _BENCHMARK_MEMORY_LAMBDA * prev_post
+                + (1 - _BENCHMARK_MEMORY_LAMBDA) * _BENCHMARK_BASELINE_Q
+            )
+            for row in round_df.itertuples():
+                denom = _BENCHMARK_PSEUDOCOUNT_TAU + float(row.n_observed)
+                q_values.at[row.Index] = (
+                    _BENCHMARK_PSEUDOCOUNT_TAU * prior + float(row.k_stag_seen)
+                ) / denom
+
+            total_stag = float(round_df["reported_is_stag"].astype(int).sum())
+            prev_post = (_BENCHMARK_PSEUDOCOUNT_TAU * prior + total_stag) / (
+                _BENCHMARK_PSEUDOCOUNT_TAU + len(round_df)
+            )
+            first_round = False
+
+    return _finalize_benchmark_rule(bench, q_values=q_values, rule_name="Carryover")
+
+
+def build_trust_weighted_benchmark(data: SweepData) -> pd.DataFrame:
+    """Benchmark using agent-specific trust weights updated across rounds."""
+    bench = build_belief_benchmark(data)
+    if bench.empty:
+        return bench
+
+    q_values = pd.Series(index=bench.index, dtype=float)
+    for _, run_df in bench.groupby("run_id", sort=False):
+        run_df = run_df.sort_values(["round", "turn_index", "agent"])
+        agents = list(dict.fromkeys(run_df["agent"].tolist()))
+        trust_a = {agent: _TRUST_INIT_A for agent in agents}
+        trust_b = {agent: _TRUST_INIT_B for agent in agents}
+        prev_post = _BENCHMARK_BASELINE_Q
+        first_round = True
+
+        for _, round_df in run_df.groupby("round", sort=True):
+            prior = (
+                _BENCHMARK_BASELINE_Q
+                if first_round
+                else _BENCHMARK_MEMORY_LAMBDA * prev_post
+                + (1 - _BENCHMARK_MEMORY_LAMBDA) * _BENCHMARK_BASELINE_Q
+            )
+            seen_weight = 0.0
+            seen_weighted_stag = 0.0
+
+            for row in round_df.itertuples():
+                denom = _BENCHMARK_PSEUDOCOUNT_TAU + seen_weight
+                q_values.at[row.Index] = (
+                    _BENCHMARK_PSEUDOCOUNT_TAU * prior + seen_weighted_stag
+                ) / denom
+
+                rho = trust_a[row.agent] / (trust_a[row.agent] + trust_b[row.agent])
+                seen_weight += rho
+                seen_weighted_stag += rho * float(row.reported_is_stag)
+
+            prev_post = (_BENCHMARK_PSEUDOCOUNT_TAU * prior + seen_weighted_stag) / (
+                _BENCHMARK_PSEUDOCOUNT_TAU + seen_weight
+            )
+
+            for row in round_df.itertuples():
+                z = 1.0 if bool(row.reported_is_stag) == bool(row.stag_success) else 0.0
+                trust_a[row.agent] += z
+                trust_b[row.agent] += 1.0 - z
+
+            first_round = False
+
+    return _finalize_benchmark_rule(
+        bench, q_values=q_values, rule_name="Trust-weighted"
+    )
+
+
+def _fig_honest_benchmark_response(
+    bench: pd.DataFrame,
+    *,
+    y_col: str,
+    ylabel: str,
+    x_label: str,
+    color: str,
+    empty_message: str,
+) -> plt.Figure:
+    """Shared response-curve figure for honest-agent benchmark comparisons."""
+    if bench.empty:
+        return _empty_fig(empty_message)
+
+    honest = bench[(bench["role"] == "Honest") & bench["benchmark_defined"]].copy()
+    honest = honest.dropna(subset=["q_margin_mid"]).copy()
+    if honest.empty:
+        return _empty_fig("No eligible honest-agent benchmark rows found")
+
+    honest[y_col] = _as_bool(honest[y_col])
+    models = _sorted_models(honest)
+    n_rows = 2
+    n_cols = max(1, math.ceil(len(models) / n_rows))
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(4.8 * n_cols, 4 * n_rows),
+        sharey=True,
+        squeeze=False,
+    )
+
+    counts = (
+        honest.groupby(["model_short", "q_margin_mid"], observed=False)
+        .size()
+        .rename("n")
+        .reset_index()
+    )
+    honest = honest.merge(counts, on=["model_short", "q_margin_mid"], how="left")
+    honest = honest[honest["n"] >= 8].copy()
+    if honest.empty:
+        return _empty_fig("No sufficiently populated honest-agent benchmark bins found")
+
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(models) :]:
+        ax.set_visible(False)
+
+    visible_axes: list[plt.Axes] = []
+    for idx, model in enumerate(models):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
+        subset = honest[honest["model_short"] == model].copy()
+        if subset.empty:
+            ax.set_visible(False)
+            continue
+
+        _lineplot_with_errorbars(
+            ax=ax,
+            data=subset,
+            x="q_margin_mid",
+            y=y_col,
+            hue="model_short",
+            hue_order=[model],
+            palette={model: color},
+            errorbar=("ci", 95),
+            dense=True,
+        )
+        ax.axvline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.7)
+        ax.set_title(model, fontsize=10)
+        ax.set_xlabel(x_label if row == n_rows - 1 else "")
+        ax.set_ylabel(ylabel if col == 0 else "")
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlim(
+            _BELIEF_MARGIN_BIN_EDGES[0] - 0.05, _BELIEF_MARGIN_BIN_EDGES[-1] + 0.05
+        )
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(0.2))
+        if ax.get_legend():
+            ax.get_legend().remove()
+        visible_axes.append(ax)
+
+    if not visible_axes:
+        return _empty_fig("No eligible honest-agent benchmark rows found")
+
+    fig.tight_layout()
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -1586,6 +1983,570 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
+# Figure 14-17 – Honest-agent belief-rule analysis
+# ---------------------------------------------------------------------------
+
+
+def fig14_belief_response(data: SweepData) -> plt.Figure:
+    """Compare honest-agent action curves under the three belief-rule margins."""
+    frames = [
+        build_belief_benchmark(data),
+        build_carryover_benchmark(data),
+        build_trust_weighted_benchmark(data),
+    ]
+    if any(frame.empty for frame in frames):
+        return _empty_fig("No agent-level data found for belief-rule response figure")
+
+    honest = pd.concat(frames, ignore_index=True)
+    honest = honest[(honest["role"] == "Honest") & honest["benchmark_defined"]].copy()
+    honest = honest.dropna(subset=["q_margin_mid"]).copy()
+    if honest.empty:
+        return _empty_fig("No eligible honest-agent benchmark rows found")
+
+    counts = (
+        honest.groupby(["model_short", "benchmark_rule", "q_margin_mid"], observed=False)
+        .size()
+        .rename("n")
+        .reset_index()
+    )
+    honest = honest.merge(
+        counts,
+        on=["model_short", "benchmark_rule", "q_margin_mid"],
+        how="left",
+    )
+    honest = honest[honest["n"] >= 8].copy()
+    if honest.empty:
+        return _empty_fig("No sufficiently populated honest-agent benchmark bins found")
+
+    models = _sorted_models(honest)
+    n_rows = 2
+    n_cols = max(1, math.ceil(len(models) / n_rows))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(4.8 * n_cols, 4 * n_rows),
+        sharey=True,
+        squeeze=False,
+    )
+
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(models) :]:
+        ax.set_visible(False)
+
+    visible_axes: list[plt.Axes] = []
+    for idx, model in enumerate(models):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
+        subset = honest[honest["model_short"] == model].copy()
+        if subset.empty:
+            ax.set_visible(False)
+            continue
+
+        _lineplot_with_errorbars(
+            ax=ax,
+            data=subset,
+            x="q_margin_mid",
+            y="original_is_stag",
+            hue="benchmark_rule",
+            hue_order=_BENCHMARK_RULE_ORDER,
+            palette=_BENCHMARK_RULE_COLORS,
+            errorbar=("ci", 95),
+            dense=True,
+        )
+        ax.axvline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.7)
+        ax.set_title(model, fontsize=10)
+        ax.set_xlabel(
+            r"Belief-rule margin $\hat{q}_{\mathrm{rule}} - q^*$"
+            if row == n_rows - 1
+            else ""
+        )
+        ax.set_ylabel("Honest P(STAG)" if col == 0 else "")
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlim(_BELIEF_MARGIN_BIN_EDGES[0] - 0.05, _BELIEF_MARGIN_BIN_EDGES[-1] + 0.05)
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(0.2))
+        if ax.get_legend():
+            ax.get_legend().remove()
+        visible_axes.append(ax)
+
+    if not visible_axes:
+        return _empty_fig("No eligible honest-agent benchmark rows found")
+
+    _add_figure_legend(
+        fig,
+        visible_axes[0],
+        title="Belief rule",
+        bbox_to_anchor=(1.01, 0.5),
+        loc="center left",
+        frameon=True,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def fig17_carryover_response(data: SweepData) -> plt.Figure:
+    """Honest STAG rate as a function of the carryover-rule margin."""
+    return _fig_honest_benchmark_response(
+        build_carryover_benchmark(data),
+        y_col="original_is_stag",
+        ylabel="Honest P(STAG)",
+        x_label=r"Carryover-rule margin $\hat{q}_{\mathrm{carry}} - q^*$",
+        color=_BENCHMARK_RULE_COLORS["Carryover"],
+        empty_message="No agent-level data found for carryover benchmark",
+    )
+
+
+def fig18_trust_response(data: SweepData) -> plt.Figure:
+    """Honest STAG rate as a function of the trust-weighted-rule margin."""
+    return _fig_honest_benchmark_response(
+        build_trust_weighted_benchmark(data),
+        y_col="original_is_stag",
+        ylabel="Honest P(STAG)",
+        x_label=r"Trust-weighted margin $\hat{q}_{\mathrm{trust}} - q^*$",
+        color=_BENCHMARK_RULE_COLORS["Trust-weighted"],
+        empty_message="No agent-level data found for trust-weighted benchmark",
+    )
+
+
+def fig17_rule_comparison(data: SweepData) -> str:
+    """Text summary comparing honest-agent match rates across the three update rules."""
+    current = build_belief_benchmark(data)
+    carryover = build_carryover_benchmark(data)
+    trust = build_trust_weighted_benchmark(data)
+
+    frames = [current, carryover, trust]
+    if any(frame.empty for frame in frames):
+        return "No agent-level data found for update-rule comparison.\n"
+
+    compare = pd.concat(frames, ignore_index=True)
+    compare = compare[
+        (compare["role"] == "Honest")
+        & compare["benchmark_defined"]
+        & (compare["n_observed"] > 0)
+    ].copy()
+    if compare.empty:
+        return "No eligible honest-agent rows found for update-rule comparison.\n"
+
+    compare["benchmark_rule"] = pd.Categorical(
+        compare["benchmark_rule"],
+        categories=_BENCHMARK_RULE_ORDER,
+        ordered=True,
+    )
+    overall = (
+        compare.groupby("benchmark_rule", observed=False)
+        .agg(
+            Eligible=("matches_benchmark", "size"),
+            Match_rate=("matches_benchmark", "mean"),
+            Match_se=("matches_benchmark", "sem"),
+            Accuracy=("is_correct", "mean"),
+            Mean_payoff=("realized_payoff", "mean"),
+        )
+        .reset_index()
+    )
+
+    by_model_stats = (
+        compare.groupby(["model_short", "benchmark_rule"], observed=False)
+        .agg(
+            Match_rate=("matches_benchmark", "mean"),
+            Match_se=("matches_benchmark", "sem"),
+        )
+        .reset_index()
+    )
+    by_model = by_model_stats.pivot(
+        index="model_short", columns="benchmark_rule", values="Match_rate"
+    ).reindex(columns=_BENCHMARK_RULE_ORDER)
+    by_model_se = by_model_stats.pivot(
+        index="model_short", columns="benchmark_rule", values="Match_se"
+    ).reindex(columns=_BENCHMARK_RULE_ORDER)
+    by_model["Best_rule"] = by_model.idxmax(axis=1)
+
+    overall_fmt = overall.copy()
+    for col in ("Match_rate", "Match_se", "Accuracy", "Mean_payoff"):
+        overall_fmt[col] = overall_fmt[col].map(lambda x: f"{float(x):.3f}")
+
+    by_model_fmt = pd.DataFrame(index=by_model.index)
+    for col in _BENCHMARK_RULE_ORDER:
+        by_model_fmt[col] = [
+            f"{float(rate):.3f} +/- {float(se):.3f}"
+            for rate, se in zip(by_model[col], by_model_se[col], strict=False)
+        ]
+    by_model_fmt["Best_rule"] = by_model["Best_rule"]
+
+    total_rows = int(
+        compare[compare["benchmark_rule"] == _BENCHMARK_RULE_ORDER[0]].shape[0]
+    )
+    lines = [
+        "# Fig 17 — Update-Rule Comparison Table",
+        "",
+        "Comparison uses honest-agent turns on common support across all three rules.",
+        "Eligible rows are turns with at least one observed prior report (n_observed > 0).",
+        "Match rate is the share of eligible honest-agent observations where the agent's original action matches the rule-implied rational action.",
+        "Accuracy is the share of those same observations where the agent's original action is correct (`is_correct`).",
+        "Match-rate standard errors are Bernoulli standard errors computed across eligible honest-agent observations.",
+        f"Eligible honest-agent observations per rule: {total_rows}",
+        "",
+        "Overall summary:",
+        overall_fmt.to_string(index=False),
+        "",
+        "Model-by-model match rate:",
+        by_model_fmt.to_string(),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def fig15_naive_match_by_turn(data: SweepData) -> plt.Figure:
+    """Honest-agent naive-aggregate match rate by speaking position."""
+    bench = build_belief_benchmark(data)
+    if bench.empty:
+        return _empty_fig("No agent-level data found for public-belief benchmark")
+
+    honest = bench[(bench["role"] == "Honest") & bench["benchmark_defined"]].copy()
+    if honest.empty:
+        return _empty_fig("No eligible honest-agent benchmark rows found")
+
+    models = _sorted_models(honest)
+    bin_order = [b for b in _LIAR_BIN_ORDER if b in honest["liar_share_bin"].values]
+    n_rows = 2
+    n_cols = max(1, math.ceil(len(models) / n_rows))
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(4.5 * n_cols, 4 * n_rows),
+        sharey=True,
+        squeeze=False,
+    )
+
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[len(models) :]:
+        ax.set_visible(False)
+
+    visible_axes: list[plt.Axes] = []
+    for idx, model in enumerate(models):
+        row, col = divmod(idx, n_cols)
+        ax = axes[row, col]
+        subset = honest[honest["model_short"] == model]
+        _lineplot_with_errorbars(
+            ax=ax,
+            data=subset,
+            x="turn_index",
+            y="matches_benchmark",
+            hue="liar_share_bin",
+            hue_order=bin_order,
+            palette=_LIAR_SHARE_PALETTE,
+            errorbar=("ci", 95),
+            dense=True,
+        )
+        ax.set_title(model, fontsize=10)
+        ax.set_xlabel("Speaking position" if row == n_rows - 1 else "")
+        ax.set_ylabel("Benchmark match rate" if col == 0 else "")
+        ax.set_ylim(-0.05, 1.05)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda x, pos: str(int(x) + 1) if x == int(x) else "")
+        )
+        if ax.get_legend():
+            ax.get_legend().remove()
+        visible_axes.append(ax)
+
+    _add_figure_legend(
+        fig,
+        visible_axes[0],
+        title="Liar fraction",
+        bbox_to_anchor=(1.01, 0.5),
+        loc="center left",
+        frameon=True,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def fig16_naive_alignment_table(data: SweepData) -> str:
+    """Text summary of honest-agent naive-aggregate alignment by model."""
+    bench = build_belief_benchmark(data)
+    if bench.empty:
+        return "No agent-level data found for public-belief benchmark.\n"
+
+    honest = bench[bench["role"] == "Honest"].copy()
+    if honest.empty:
+        return "No honest-agent data found for public-belief benchmark.\n"
+
+    rows: list[dict[str, int | float | str]] = []
+    for model, grp in honest.groupby("model_short", sort=True):
+        honest_obs = int(len(grp))
+        eligible = grp[grp["benchmark_defined"]].copy()
+        no_prior = honest_obs - int(len(eligible))
+
+        below = eligible[eligible["q_margin"] < 0]
+        above = eligible[eligible["q_margin"] > 0]
+        near = eligible[eligible["q_margin"].abs() <= 0.1]
+        matched = eligible[eligible["matches_benchmark"]]
+        mismatched = eligible[~eligible["matches_benchmark"]]
+
+        rows.append(
+            {
+                "Model": model,
+                "Honest obs": honest_obs,
+                "Eligible": int(len(eligible)),
+                "No-prior": no_prior,
+                "Match rate": float(eligible["matches_benchmark"].mean())
+                if not eligible.empty
+                else float("nan"),
+                "False coop": float(below["false_cooperate"].mean())
+                if not below.empty
+                else float("nan"),
+                "False defect": float(above["false_defect"].mean())
+                if not above.empty
+                else float("nan"),
+                "Near-threshold match": float(near["matches_benchmark"].mean())
+                if not near.empty
+                else float("nan"),
+                "Correct if match": float(matched["is_correct"].mean())
+                if not matched.empty
+                else float("nan"),
+                "Correct if mismatch": float(mismatched["is_correct"].mean())
+                if not mismatched.empty
+                else float("nan"),
+                "Payoff if match": float(matched["realized_payoff"].mean())
+                if not matched.empty
+                else float("nan"),
+                "Payoff if mismatch": float(mismatched["realized_payoff"].mean())
+                if not mismatched.empty
+                else float("nan"),
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+    summary = summary.sort_values(
+        ["Match rate", "Model"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+    rate_cols = [
+        "Match rate",
+        "False coop",
+        "False defect",
+        "Near-threshold match",
+        "Correct if match",
+        "Correct if mismatch",
+    ]
+    payoff_cols = ["Payoff if match", "Payoff if mismatch"]
+    for col in rate_cols:
+        summary[col] = summary[col].map(
+            lambda x: "n/a" if pd.isna(x) else f"{float(x):.3f}"
+        )
+    for col in payoff_cols:
+        summary[col] = summary[col].map(
+            lambda x: "n/a" if pd.isna(x) else f"{float(x):.3f}"
+        )
+
+    total_honest = int(len(honest))
+    total_eligible = int(honest["benchmark_defined"].sum())
+    total_no_prior = total_honest - total_eligible
+
+    lines = [
+        "# Fig 16 — Naive-Aggregate Alignment Table",
+        "",
+        "Main comparison uses honest agents only from base/default runs (a1, base, h1).",
+        "Eligible rows are turns with an observable prior; no-prior rows are excluded from match-rate statistics.",
+        f"Total honest observations: {total_honest}",
+        f"Eligible observations: {total_eligible}",
+        f"Excluded no-prior observations: {total_no_prior}",
+        r"Near-threshold means $|\hat{q} - q^*| \le 0.1$.",
+        "",
+        summary.to_string(index=False),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def figure_story_doc(_: SweepData) -> str:
+    """Markdown guide describing the purpose/story of each figure."""
+    return r"""# Stag Hunt Figure Guide
+
+This document explains what each analysis figure is trying to show, why it exists, and what story to read from it.
+
+## Core coordination and learning figures
+
+### Fig 1 — Coordination Success vs. Liar Fraction
+Purpose: Show the main failure mode of the system as adversarial participation increases.
+
+Story: Coordination succeeds reliably at low liar fractions and then degrades as corruption pushes the group below the effective coordination threshold.
+
+### Fig 1 Highlight — N=5, M=3
+Purpose: Give one clean focal setting where the coordination transition is easy to inspect.
+
+Story: This is the most presentation-friendly slice of Fig 1 and makes the onset of failure easier to compare across models.
+
+### Fig 2 — Honest-Agent Accuracy & Confidence Over Rounds
+Purpose: Compare actual learning quality to self-reported confidence over repeated discussion rounds.
+
+Story: Honest agents can become less accurate even while confidence stays high, which is evidence of confident error under corruption.
+
+### Fig 2 Alternate — Combined Models
+Purpose: Put all models on the same figure so cross-model differences are direct.
+
+Story: This emphasizes relative model robustness rather than within-model liar-fraction effects.
+
+### Fig 2 Alternate B — Focused Confidence Gap
+Purpose: Highlight the gap between honest confidence and honest accuracy.
+
+Story: This is a compact view of overconfidence dynamics. Positive values mean agents are more confident than their actual accuracy warrants.
+
+### Fig 3 — Expected Calibration Error
+Purpose: Summarize whether honest-agent confidence tracks actual correctness.
+
+Story: Lower ECE means confidence is informative; higher ECE means agents are systematically miscalibrated.
+
+## Strategic influence and outcome figures
+
+### Fig 4 — Liar Influence
+Purpose: Measure how much earlier speakers shape later speakers' reports.
+
+Story: As liar pressure increases, influence shifts away from honest agents and toward deceptive or corrupted reports.
+
+### Fig 4 Alternate — Liar-Honest Influence Gap
+Purpose: Collapse Fig 4 into one signed comparison.
+
+Story: Positive values mean liars are more influential than honest agents in that setting.
+
+### Fig 5 — Honest-Agent Payoffs
+Purpose: Connect coordination quality to realized utility for honest players.
+
+Story: As corruption rises, honest agents lose payoff even when they are not the ones lying.
+
+### Fig 6 — Accuracy Heatmap
+Purpose: Show the broad shape of performance over the parameter grid.
+
+Story: This is the fastest overview of where the system is robust versus brittle.
+
+### Fig 7 — Consensus Dynamics
+Purpose: Track how quickly honest-agent consensus forms or collapses over rounds.
+
+Story: Stable consensus at low liar pressure can give way to fragmentation or corrupted consensus at higher liar pressure.
+
+### Fig 9 — Coordination Dynamics Over Rounds
+Purpose: Show whether coordination improves, stalls, or collapses within a game.
+
+Story: This complements Fig 1 by adding temporal structure rather than only aggregate success rates.
+
+### Fig 10 — Turn-Order Effects
+Purpose: Identify whether speaking later helps or hurts honest agents.
+
+Story: Later speakers can benefit from more information when reports are trustworthy, but they can also become more exposed to corrupted cascades.
+
+## Ablation tables
+
+### Fig 11 — B3 Matched Table
+Purpose: Compare random-noise adversaries against the base adversary under matched settings.
+
+Story: This isolates how much of the effect is specific to deterministic flipping rather than adversarial corruption in general.
+
+### Fig 12 — H1 vs H2 Matched Table
+Purpose: Compare homogeneous groups with mixed-model groups under matched parameter points.
+
+Story: This tests whether heterogeneity changes coordination success after controlling for the rest of the setup.
+
+### Fig 13 — H1 vs H3 Matched Table
+Purpose: Compare homogeneous groups with asymmetric liar/non-liar model assignment.
+
+Story: This tests whether giving liars a model-strength advantage or disadvantage changes outcomes.
+
+## Public-belief benchmark figures
+
+### Fig 14 — Honest-Agent Action vs Belief-Rule Margin
+Purpose: Compare the honest-agent response curves implied by the three benchmark rules on a common set of axes.
+
+Story: The key comparison is whether the carryover and trust-weighted rules produce cleaner threshold-like response curves than the naive aggregate rule.
+
+How Fig 14 changed:
+- The first version showed only the naive aggregate rule.
+- The current version overlays the naive aggregate, carryover, and trust-weighted response curves inside each model panel.
+- This makes the figure a direct visual comparison rather than a single-rule diagnostic.
+
+### Fig 15 — Naive-Aggregate Agreement by Turn
+Purpose: Show where in the speaking order honest agents align with the naive aggregate rule.
+
+Story: This identifies whether deviations from the naive aggregate rule are concentrated among early speakers, late speakers, or uniformly across the round.
+
+### Fig 16 — Naive-Aggregate Alignment Table
+Purpose: Give a compact model-by-model summary of naive-aggregate agreement and its consequences.
+
+Story: This table shows who matches the naive aggregate rule most often, what kinds of mistakes they make, and whether mismatches are costly in correctness or payoff terms.
+
+### Fig 17 — Update-Rule Comparison Table
+Purpose: Compare the naive aggregate rule against the two richer alternatives on a common-support match-rate metric in text-table form.
+
+Story: This is the direct model-selection figure for the benchmark family. Higher values mean the rule better matches honest-agent observed behavior on turns where all three rules are comparable.
+
+## Candidate Alternative Belief Rules
+
+These are candidate extensions to the naive aggregate benchmark. The two strongest variants now appear as overlaid curves in Fig 14, with a direct comparison table in Fig 17.
+
+Notation:
+- Let \(y_j^t \in \{0,1\}\) denote agent \(j\)'s public report in round \(t\), where \(1=\mathrm{STAG}\).
+- Let \(S_i^t\) be the set of speakers agent \(i\) has observed so far in round \(t\).
+- Let \(q_i^t\) denote agent \(i\)'s belief about the public STAG report rate.
+- Let \(\hat q_i^t\) denote the rule-implied estimate of that public belief used in the benchmark figures below.
+- In this section, beliefs are about the transcript-level / public report process, not a latent true-action rate.
+
+### 1. Carryover-Prior Update
+
+Start each round with a prior anchored in the previous round's posterior:
+
+\[
+q_{i,\mathrm{prior}}^{t} = \lambda \hat q_{i,\mathrm{post}}^{t-1} + (1-\lambda) q_0
+\]
+
+where \(q_0 \in [0,1]\) is a neutral baseline prior over public STAG reports and \(\lambda \in [0,1]\) controls memory strength.
+
+Update within the round using pseudo-count pooling:
+
+\[
+\hat q_i^t = \frac{\tau q_{i,\mathrm{prior}}^{t} + \sum_{j \in S_i^t} y_j^t}{\tau + |S_i^t|}
+\]
+
+where \(\tau > 0\) is the prior strength.
+
+Story: agents assume the public reporting environment persists across rounds, but revise that prior as current-round reports arrive.
+
+### 2. Agent-Specific Trust Update
+
+Instead of weighting all speakers equally, let agent \(i\) maintain a trust weight \(\rho_{ij}^t \in [0,1]\) for each other agent \(j\). Here \(\rho_{ij}^t\) should be interpreted as a predictive weight on how informative \(j\)'s public reports are about future public STAG reporting, not as an attempt to recover a hidden true action. Then form a weighted within-round estimate:
+
+\[
+\hat q_i^t = \frac{\tau q_{i,\mathrm{prior}}^{t} + \sum_{j \in S_i^t} \rho_{ij}^t y_j^t}{\tau + \sum_{j \in S_i^t} \rho_{ij}^t}
+\]
+
+Update trust across rounds using a simple Beta-style reliability score. Let \(z_j^t \in \{0,1\}\) indicate whether agent \(j\)'s public report in round \(t\) matched some target notion of reliability, such as the final round outcome or the final majority report. Maintain
+
+\[
+a_{ij}^{t+1} = a_{ij}^{t} + z_j^t, \qquad b_{ij}^{t+1} = b_{ij}^{t} + (1-z_j^t)
+\]
+
+and define the trust weight as
+
+\[
+\rho_{ij}^{t+1} = \frac{a_{ij}^{t+1}}{a_{ij}^{t+1} + b_{ij}^{t+1}}
+\]
+
+Story: agents learn not just how STAG-heavy the public report environment is, but which specific speakers are worth weighting when forecasting future public reports.
+
+### Recommendation for Discussion
+
+If the goal is to present a small, interpretable family of richer benchmarks, the strongest comparison set is:
+
+1. Naive aggregate public-belief rule
+2. Carryover-prior update
+3. Agent-specific trust update
+
+These span three distinct ideas:
+- no memory beyond the current round
+- generic memory of the public reporting environment
+- memory about individual speaker reliability rather than only aggregate group state
+"""
+
+
+# ---------------------------------------------------------------------------
 # Figure 11-13 – Matched ablation tables (text)
 # ---------------------------------------------------------------------------
 
@@ -1992,6 +2953,26 @@ FIGURE_REGISTRY: dict[str, tuple[str, callable]] = {
         "Turn-Order Effects (A1: Fixed Order)",
         fig_turn_order_effects,
     ),
+    "fig14_belief_response": (
+        "Honest-Agent Action vs Belief-Rule Margin",
+        fig14_belief_response,
+    ),
+    "fig15_naive_match_by_turn": (
+        "Naive-Aggregate Agreement by Turn",
+        fig15_naive_match_by_turn,
+    ),
+    "fig16_naive_alignment_table": (
+        "Naive-Aggregate Alignment Table",
+        fig16_naive_alignment_table,
+    ),
+    "fig17_rule_comparison": (
+        "Update-Rule Comparison Table",
+        fig17_rule_comparison,
+    ),
+    "figure_story_doc": (
+        "Figure Purpose and Story Guide",
+        figure_story_doc,
+    ),
     "fig11_b3_matched_table": (
         "B3 Ablation Matched Roundwise Table",
         fig11_b3_matched_round_table,
@@ -2020,6 +3001,11 @@ _NON_ABLATION_FIGURE_KEYS = {
     "fig7_consensus_entropy",
     "fig9_coordination_dynamics",
     "fig10_turn_order",
+    "fig14_belief_response",
+    "fig15_naive_match_by_turn",
+    "fig16_naive_alignment_table",
+    "fig17_rule_comparison",
+    "figure_story_doc",
 }
 
 
@@ -2069,7 +3055,8 @@ def generate_all_figures(
             saved.append(path)
             print(f"    -> {path}")
         elif isinstance(result, str):
-            path = out / f"{key}.txt"
+            suffix = ".md" if key == "figure_story_doc" else ".txt"
+            path = out / f"{key}{suffix}"
             path.write_text(result, encoding="utf-8")
             saved.append(path)
             print(f"    -> {path}")

@@ -34,12 +34,12 @@ def compute_belief(
     n_observed: int,
     num_agents: int,
     num_liars: int,
-) -> tuple[float, float | None, float | None]:
-    """Compute the full belief update pipeline for one agent (§3.1).
+) -> tuple[float, float | None]:
+    """Compute the public-belief benchmark for one agent (§3.1).
 
     When n_observed == 0 (first agent to speak in round 1), there are no
-    prior reports to update from.  In that case q_hat and q_corrected are
-    returned as None — the belief is *unobservable*, not defaulted to 0.5.
+    prior reports to update from.  In that case q_hat is returned as None —
+    the belief is *unobservable*, not defaulted to 0.5.
     Use infer_first_round_belief() to characterise round-1 beliefs instead.
 
     Args:
@@ -49,27 +49,22 @@ def compute_belief(
         num_liars:  F — number of adversarial agents.
 
     Returns:
-        (alpha, q_hat, q_corrected)
+        (alpha, q_hat)
         alpha       — signal reliability (N−F)/N; always returned.
-        q_hat       — raw fraction of STAG reports; None when n_observed == 0.
-        q_corrected — α-corrected belief (§3.1 formula); None when n_observed == 0.
+        q_hat       — public STAG belief using the current paper convention
+                      K/(N-1); None when n_observed == 0.
     """
     alpha = compute_alpha(num_agents, num_liars)
 
     if n_observed == 0:
         # No reports seen yet — belief is unobservable in round 1.
         # Caller should use infer_first_round_belief() for the §3.3 inference.
-        return alpha, None, None
+        return alpha, None
 
-    q_hat = k_stag / n_observed
+    denom = max(num_agents - 1, 1)
+    q_hat = k_stag / denom
 
-    # Linear α-correction (§3.1):
-    #   q_i = α · q̂ + (1 − α) · (1 − q̂)
-    # Derivation: with prob α the signal is honest → true rate ≈ q̂;
-    # with prob (1−α) it was flipped → true rate ≈ 1 − q̂.
-    q_corrected = alpha * q_hat + (1 - alpha) * (1 - q_hat)
-
-    return alpha, q_hat, q_corrected
+    return alpha, q_hat
 
 
 # ============================================================================

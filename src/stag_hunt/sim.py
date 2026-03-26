@@ -15,12 +15,12 @@ Built on flashlite's MultiAgentChat:
 Belief model (beliefs.py) integration:
 - q* is computed ONCE at simulation init from fixed game parameters (§3.2).
   It is a config-level constant, not a round-level variable.
-- Per-turn belief fields (alpha, q_hat, q_corrected, rational_action) are
+- Per-turn belief fields (alpha, q_hat, rational_action) are
   computed as an ANALYTICAL BENCHMARK alongside LLM decisions — they do not
   drive agent behaviour.  The LLM speaks first; the benchmark is evaluated
   after the fact to assess payoff-rationality.
 - Round 1 is handled specially: when an agent has seen zero prior reports,
-  q_hat and q_corrected are undefined (returned as None).  The §3.3 revealed-
+  q_hat is undefined (returned as None).  The §3.3 revealed-
   belief inference (infer_first_round_belief) is used instead.
 - matches_rational compares the agent's ORIGINAL (pre-lying) action against
   the benchmark prediction. Public (post-lying) action and realized payoff
@@ -200,7 +200,7 @@ class StagHuntSimulation:
     Belief model:
     - ``self.q_star`` is computed once at init from fixed game parameters.
       It is a game-level constant (§3.2), not a per-round variable.
-    - Per-turn fields (q_hat, q_corrected, rational_action) are computed in
+    - Per-turn fields (q_hat, rational_action) are computed in
       run_round() as an analytical benchmark — not as agent policy.
 
     Note on adversary_ablation == "b3":
@@ -461,11 +461,10 @@ class StagHuntSimulation:
         alpha               Signal reliability (N−F)/N.  §3.1
         k_stag_seen         Number of public STAG reports seen before speaking.
         n_observed          Number of agents who spoke before this agent.
-        q_hat               Raw uncorrected belief (None in round 1, turn 0).  §3.1
-        q_corrected         α-corrected belief (None in round 1, turn 0).  §3.1
+        q_hat               Public STAG belief (None in round 1, turn 0).  §3.1
         q_star              Rational cooperation threshold (game constant).  §3.2
-        rational_action     Theory's best response given q_corrected.
-                            None when q_corrected is unavailable (round 1, turn 0).
+        rational_action     Theory's best response given q_hat.
+                            None when q_hat is unavailable (round 1, turn 0).
         matches_rational    Whether the agent's ORIGINAL (pre-lying) action equals
                             rational_action.  None when rational_action is None.
                             NOTE: payoffs are settled on public (post-lying) action;
@@ -518,9 +517,9 @@ class StagHuntSimulation:
             )
 
             # -- §3.1 Belief update ----------------------------------------
-            # compute_belief returns (alpha, None, None) when n_observed == 0
+            # compute_belief returns (alpha, None) when n_observed == 0
             # (first speaker has seen no reports).
-            alpha, q_hat, q_corrected = compute_belief(
+            alpha, q_hat = compute_belief(
                 k_stag=k_i,
                 n_observed=n_observed,
                 num_agents=self.config.num_agents,
@@ -528,12 +527,12 @@ class StagHuntSimulation:
             )
 
             # -- §3.2 Rational action benchmark ----------------------------
-            # Only defined when q_corrected is available.
+            # Only defined when q_hat is available.
             rational: str | None = None
             matches_rational: bool | None = None
-            if q_corrected is not None:
+            if q_hat is not None:
                 rational = compute_rational_action(
-                    q=q_corrected,
+                    q=q_hat,
                     num_agents=self.config.num_agents,
                     threshold_m=threshold_m,
                     payoff_stag_success=self.config.payoff_stag_success,
@@ -582,20 +581,19 @@ class StagHuntSimulation:
                 "k_stag_seen": k_i,
                 "n_observed": n_observed,
                 "q_hat": q_hat,                        # None if n_observed == 0
-                "q_corrected": q_corrected,            # None if n_observed == 0
                 "q_star": self.q_star,                 # game constant, same every row
-                "rational_action": rational,           # None if q_corrected is None
+                "rational_action": rational,           # None if q_hat is None
                 "matches_rational": matches_rational,  # None if rational is None
                 "revealed_belief_region": revealed_belief_region,  # round 1 only
             }
             round_results.append(result)
 
-            # Print — show q_corrected when available, otherwise mark as unobserved
+            # Print — show q_hat when available, otherwise mark as unobserved
             liar_tag = " [LIAR]" if role.is_liar else ""
             flip_tag = " (FLIPPED)" if was_flipped else ""
             if rational is not None:
                 bench_tag = " [RATIONAL]" if matches_rational else " [IRRATIONAL]"
-                belief_str = f"q={q_corrected:.2f}, q*={self.q_star:.2f}"
+                belief_str = f"q={q_hat:.2f}, q*={self.q_star:.2f}"
             else:
                 bench_tag = " [NO PRIOR]"
                 belief_str = f"q=n/a, q*={self.q_star:.2f}"
