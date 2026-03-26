@@ -44,15 +44,16 @@ def compute_belief(
 
     Args:
         k_stag:     Number of public STAG reports seen before this agent speaks.
-        n_observed: Total agents who have already spoken (= this agent's turn index).
+        n_observed: Total public reports observed before this agent speaks.
         num_agents: N — total agents in the game.
         num_liars:  F — number of adversarial agents.
 
     Returns:
         (alpha, q_hat)
         alpha       — signal reliability (N−F)/N; always returned.
-        q_hat       — public STAG belief using the current paper convention
-                      K/(N-1); None when n_observed == 0.
+        q_hat       — empirical public STAG rate K / n_observed over the
+                      reports currently in the agent's information set;
+                      None when n_observed == 0.
     """
     alpha = compute_alpha(num_agents, num_liars)
 
@@ -61,8 +62,7 @@ def compute_belief(
         # Caller should use infer_first_round_belief() for the §3.3 inference.
         return alpha, None
 
-    denom = max(num_agents - 1, 1)
-    q_hat = k_stag / denom
+    q_hat = k_stag / n_observed
 
     return alpha, q_hat
 

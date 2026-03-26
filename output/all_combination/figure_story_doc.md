@@ -88,7 +88,7 @@ Purpose: Compare homogeneous groups with asymmetric liar/non-liar model assignme
 
 Story: This tests whether giving liars a model-strength advantage or disadvantage changes outcomes.
 
-## Belief-rule figures
+## Public-belief benchmark figures
 
 ### Fig 14 — Honest-Agent Action vs Belief-Rule Margin
 Purpose: Compare the honest-agent response curves implied by the three benchmark rules on a common set of axes.
@@ -103,17 +103,17 @@ How Fig 14 changed:
 ### Fig 15 — Naive-Aggregate Agreement by Turn
 Purpose: Show where in the speaking order honest agents align with the naive aggregate rule.
 
-Story: This identifies whether deviations from the naive aggregate rule are concentrated among early speakers, late speakers, or uniformly across the round. The plotted quantity is the honest-agent match rate with the naive-aggregate rule.
+Story: This identifies whether deviations from the naive aggregate rule are concentrated among early speakers, late speakers, or uniformly across the round.
 
 ### Fig 16 — Naive-Aggregate Alignment Table
 Purpose: Give a compact model-by-model summary of naive-aggregate agreement and its consequences.
 
-Story: This table shows who matches the naive aggregate rule most often, what kinds of mistakes they make, and whether mismatches are costly in correctness or payoff terms. It is the per-model diagnostic table for the naive-aggregate baseline only.
+Story: This table shows who matches the naive aggregate rule most often, what kinds of mistakes they make, and whether mismatches are costly in correctness or payoff terms.
 
 ### Fig 17 — Update-Rule Comparison Table
 Purpose: Compare the naive aggregate rule against the two richer alternatives on a common-support match-rate metric in text-table form.
 
-Story: This is the direct model-selection figure for the benchmark family. Higher values mean the rule better matches honest-agent observed behavior on turns where all three rules are comparable. The table reports match-rate standard errors, and also includes the observed-action accuracy on the same eligible honest-agent rows.
+Story: This is the direct model-selection figure for the benchmark family. Higher values mean the rule better matches honest-agent observed behavior on turns where all three rules are comparable.
 
 ## Candidate Alternative Belief Rules
 
@@ -180,8 +180,3 @@ These span three distinct ideas:
 - no memory beyond the current round
 - generic memory of the public reporting environment
 - memory about individual speaker reliability rather than only aggregate group state
-
-Current figure mapping:
-- Fig 14 gives the direct visual comparison of all three rules.
-- Fig 15 and Fig 16 are naive-aggregate diagnostics.
-- Fig 17 is the compact summary table comparing all three rules.

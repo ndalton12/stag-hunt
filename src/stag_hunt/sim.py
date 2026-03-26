@@ -461,7 +461,8 @@ class StagHuntSimulation:
         alpha               Signal reliability (N−F)/N.  §3.1
         k_stag_seen         Number of public STAG reports seen before speaking.
         n_observed          Number of agents who spoke before this agent.
-        q_hat               Public STAG belief (None in round 1, turn 0).  §3.1
+        q_hat               Public STAG belief estimate K / n_observed
+                            (None in round 1, turn 0).  §3.1
         q_star              Rational cooperation threshold (game constant).  §3.2
         rational_action     Theory's best response given q_hat.
                             None when q_hat is unavailable (round 1, turn 0).
@@ -476,7 +477,9 @@ class StagHuntSimulation:
         Note on k_stag_seen / q_hat:
             These reflect the *publicly reported* STAG count (which includes
             adversarially flipped signals), not the true cooperation rate.
-            This matches what agents actually observe in the transcript.
+            q_hat is the observed STAG report rate over the reports currently
+            available to the agent. This matches what agents actually observe
+            in the transcript.
         """
         print(f"\n{'=' * 60}")
         print(f"ROUND {round_num}")

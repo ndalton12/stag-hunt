@@ -9,17 +9,17 @@ Eligible honest-agent observations per rule: 2852
 
 Overall summary:
  benchmark_rule  Eligible Match_rate Match_se Accuracy Mean_payoff
-Naive aggregate      2852      0.761    0.008    0.877       3.180
+Naive aggregate      2852      0.829    0.007    0.877       3.180
       Carryover      2852      0.846    0.007    0.877       3.180
  Trust-weighted      2852      0.850    0.007    0.877       3.180
 
 Model-by-model match rate:
-                            Naive aggregate        Carryover   Trust-weighted       Best_rule
-model_short                                                                                  
-deepseek-v3.2-think         0.825 +/- 0.019  0.908 +/- 0.014  0.910 +/- 0.014  Trust-weighted
-ernie-5.0-thinking-preview  0.763 +/- 0.021  0.873 +/- 0.017  0.875 +/- 0.017  Trust-weighted
-glm-5                       0.771 +/- 0.021  0.865 +/- 0.017  0.880 +/- 0.016  Trust-weighted
-gpt-5-mini                  0.846 +/- 0.019  0.886 +/- 0.016  0.902 +/- 0.015  Trust-weighted
-gpt-5.2-2025-12-11          0.832 +/- 0.018  0.954 +/- 0.010  0.957 +/- 0.010  Trust-weighted
-kimi-k2.5                   0.758 +/- 0.021  0.843 +/- 0.018  0.840 +/- 0.018       Carryover
-llama-3.1-8b                0.563 +/- 0.023  0.622 +/- 0.023  0.618 +/- 0.023       Carryover
+                            Naive aggregate        Carryover   Trust-weighted        Best_rule
+model_short                                                                                   
+deepseek-v3.2-think         0.888 +/- 0.016  0.908 +/- 0.014  0.910 +/- 0.014   Trust-weighted
+ernie-5.0-thinking-preview  0.863 +/- 0.017  0.873 +/- 0.017  0.875 +/- 0.017   Trust-weighted
+glm-5                       0.845 +/- 0.018  0.865 +/- 0.017  0.880 +/- 0.016   Trust-weighted
+gpt-5-mini                  0.867 +/- 0.017  0.886 +/- 0.016  0.902 +/- 0.015   Trust-weighted
+gpt-5.2-2025-12-11          0.901 +/- 0.015  0.954 +/- 0.010  0.957 +/- 0.010   Trust-weighted
+kimi-k2.5                   0.848 +/- 0.018  0.843 +/- 0.018  0.840 +/- 0.018  Naive aggregate
+llama-3.1-8b                0.620 +/- 0.023  0.622 +/- 0.023  0.618 +/- 0.023        Carryover
