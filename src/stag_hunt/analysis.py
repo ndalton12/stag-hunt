@@ -35,6 +35,10 @@ _ROLE_COLORS = {"Honest": "#4C72B0", "Liar": "#DD8452"}
 _LIAR_SHARE_PALETTE = "viridis_r"
 _FIG_SINGLE = (8, 5)
 _FIG_WIDE = (12, 5)
+_FONT_SIZE_BASE = 16
+_FONT_SIZE_TICKS = 15
+_FONT_SIZE_TITLE = 18
+_FONT_SIZE_SMALL = 14
 _DENSE_LINE_KWS = {
     "marker": None,
     "linewidth": 1.5,
@@ -76,6 +80,13 @@ def _apply_style() -> None:
             "figure.dpi": 200,
             "savefig.dpi": 200,
             "savefig.bbox": "tight",
+            "font.size": _FONT_SIZE_BASE,
+            "axes.titlesize": _FONT_SIZE_TITLE,
+            "axes.labelsize": _FONT_SIZE_BASE,
+            "xtick.labelsize": _FONT_SIZE_TICKS,
+            "ytick.labelsize": _FONT_SIZE_TICKS,
+            "legend.fontsize": _FONT_SIZE_BASE,
+            "legend.title_fontsize": _FONT_SIZE_BASE,
         }
     )
 
@@ -729,7 +740,7 @@ def _fig_honest_benchmark_response(
             dense=True,
         )
         ax.axvline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.7)
-        ax.set_title(model, fontsize=10)
+        ax.set_title(model)
         ax.set_xlabel(x_label if row == n_rows - 1 else "")
         ax.set_ylabel(ylabel if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
@@ -839,10 +850,10 @@ def fig_coordination_vs_liar_share(data: SweepData) -> plt.Figure:
             linestyle="--",
             color="black",
             alpha=0.6,
-            label="1 - M/N threshold",
+            label="(1 - M/N) threshold",
         )
         row, col = divmod(idx, n_cols)
-        ax.set_title(f"N={n_agents}, M={threshold}", fontsize=10)
+        ax.set_title(f"N={n_agents}, M={threshold}")
         ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
         ax.set_ylabel("Stag success rate" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
@@ -912,14 +923,16 @@ def fig1_highlight(data: SweepData) -> plt.Figure:
         linestyle="--",
         color="black",
         alpha=0.6,
-        label="1 - M/N threshold",
+        label="(1 - M/N) threshold",
     )
-    ax.set_title("N=5, M=3", fontsize=10)
+    ax.set_title("N=5, M=3")
     ax.set_xlabel("Liar fraction")
     ax.set_ylabel("Stag success rate")
     ax.set_ylim(-0.05, 1.05)
     ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
     ax.xaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+    if ax.get_legend():
+        ax.get_legend().remove()
     _add_figure_legend(
         fig,
         ax,
@@ -980,7 +993,7 @@ def fig_accuracy_over_rounds(data: SweepData) -> plt.Figure:
                 dense=True,
             )
             if row == 0:
-                ax.set_title(model, fontsize=10)
+                ax.set_title(model)
             ax.set_xlabel("Round" if row == n_rows - 1 else "")
             ax.set_ylabel(metric_label if col == 0 else "")
             ax.set_ylim(-0.05, 1.05)
@@ -1058,7 +1071,7 @@ def fig2_alternate(data: SweepData) -> plt.Figure:
                 dense=True,
             )
             if row == 0:
-                ax.set_title(f"Liar fraction {bin_label}", fontsize=10)
+                ax.set_title(f"Liar fraction {bin_label}")
             ax.set_xlabel("Round" if row == n_rows - 1 else "")
             ax.set_ylabel(metric_label if col == 0 else "")
             ax.set_ylim(-0.05, 1.05)
@@ -1199,7 +1212,7 @@ def fig2_alternate_b(data: SweepData) -> plt.Figure:
             row_maxs[row] = max(row_maxs[row], local_max)
 
             if row == 0:
-                ax.set_title(f"{bin_label} liars", fontsize=10)
+                ax.set_title(f"{bin_label} liars")
             ax.set_xlabel("Round" if row == len(metrics) - 1 else "")
             ax.set_ylabel(metric_label if col == 0 else "")
             ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
@@ -1315,7 +1328,7 @@ def fig_confidence_calibration(data: SweepData) -> plt.Figure:
         0.95,
         "Honest",
         transform=ax.transAxes,
-        fontsize=9,
+        fontsize=_FONT_SIZE_SMALL,
         va="top",
         fontweight="bold",
         color=_ROLE_COLORS["Honest"],
@@ -1468,7 +1481,7 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
             ax=ax,
         )
-        ax.set_title(model, fontsize=10)
+        ax.set_title(model)
         ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
         ax.set_ylabel("Influence on later agents" if col == 0 else "")
         ax.set_ylim(0, 1.05)
@@ -1549,7 +1562,7 @@ def fig4_alternate(data: SweepData) -> plt.Figure:
             ax=ax,
         )
 
-        ax.set_title(model, fontsize=10)
+        ax.set_title(model)
         ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
         ax.set_ylabel("Influence gap (Liar - Honest)" if col == 0 else "")
         ax.axhline(0.0, color="0.25", linestyle="--", linewidth=1, alpha=0.8)
@@ -1713,7 +1726,7 @@ def fig_parameter_heatmap(data: SweepData) -> plt.Figure:
                 1.02,
                 f"{model}  (M={threshold})",
                 transform=ax.transAxes,
-                fontsize=8,
+                fontsize=_FONT_SIZE_SMALL,
                 va="bottom",
                 color="0.4",
             )
@@ -1886,7 +1899,7 @@ def fig_coordination_over_rounds(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
             dense=True,
         )
-        ax.set_title(model, fontsize=10)
+        ax.set_title(model)
         ax.set_xlabel("Round" if row == n_rows - 1 else "")
         ax.set_ylabel("Stag success rate" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
@@ -1957,7 +1970,7 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
             dense=True,
         )
-        ax.set_title(model, fontsize=10)
+        ax.set_title(model)
         ax.set_xlabel("Speaking position" if row == n_rows - 1 else "")
         ax.set_ylabel("Honest-agent accuracy" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
@@ -2004,7 +2017,9 @@ def fig14_belief_response(data: SweepData) -> plt.Figure:
         return _empty_fig("No eligible honest-agent benchmark rows found")
 
     counts = (
-        honest.groupby(["model_short", "benchmark_rule", "q_margin_mid"], observed=False)
+        honest.groupby(
+            ["model_short", "benchmark_rule", "q_margin_mid"], observed=False
+        )
         .size()
         .rename("n")
         .reset_index()
@@ -2054,7 +2069,7 @@ def fig14_belief_response(data: SweepData) -> plt.Figure:
             dense=True,
         )
         ax.axvline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.7)
-        ax.set_title(model, fontsize=10)
+        ax.set_title(model)
         ax.set_xlabel(
             r"Belief-rule margin $\hat{q}_{\mathrm{rule}} - q^*$"
             if row == n_rows - 1
@@ -2062,7 +2077,9 @@ def fig14_belief_response(data: SweepData) -> plt.Figure:
         )
         ax.set_ylabel("Honest P(STAG)" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
-        ax.set_xlim(_BELIEF_MARGIN_BIN_EDGES[0] - 0.05, _BELIEF_MARGIN_BIN_EDGES[-1] + 0.05)
+        ax.set_xlim(
+            _BELIEF_MARGIN_BIN_EDGES[0] - 0.05, _BELIEF_MARGIN_BIN_EDGES[-1] + 0.05
+        )
         ax.xaxis.set_major_locator(mticker.MultipleLocator(0.2))
         if ax.get_legend():
             ax.get_legend().remove()
@@ -2237,7 +2254,7 @@ def fig15_naive_match_by_turn(data: SweepData) -> plt.Figure:
             errorbar=("ci", 95),
             dense=True,
         )
-        ax.set_title(model, fontsize=10)
+        ax.set_title(model)
         ax.set_xlabel("Speaking position" if row == n_rows - 1 else "")
         ax.set_ylabel("Benchmark match rate" if col == 0 else "")
         ax.set_ylim(-0.05, 1.05)
