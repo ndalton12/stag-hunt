@@ -35,9 +35,9 @@ _ROLE_COLORS = {"Honest": "#4C72B0", "Liar": "#DD8452"}
 _LIAR_SHARE_PALETTE = "viridis_r"
 _FIG_SINGLE = (8, 5)
 _FIG_WIDE = (12, 5)
-_FONT_SIZE_BASE = 19
+_FONT_SIZE_BASE = 21
 _FONT_SIZE_TICKS = 16
-_FONT_SIZE_TITLE = 19
+_FONT_SIZE_TITLE = 23
 _FONT_SIZE_SMALL = 17
 _DENSE_LINE_KWS = {
     "marker": None,
@@ -297,6 +297,57 @@ def _add_figure_legend(fig: plt.Figure, ax: plt.Axes, **kwargs) -> None:
     """Extract handles/labels from *ax* and attach a single figure legend."""
     handles, labels = ax.get_legend_handles_labels()
     fig.legend(handles, labels, **kwargs)
+
+
+def _hide_unused_axes(axes: np.ndarray, n_used: int) -> list[plt.Axes]:
+    """Hide all subplot axes after the first *n_used* occupied panels."""
+    flat_axes = list(axes.flat)
+    for ax in flat_axes[n_used:]:
+        ax.set_visible(False)
+    return flat_axes
+
+
+def _reserve_legend_axis(
+    axes: np.ndarray, n_used: int
+) -> tuple[list[plt.Axes], plt.Axes | None]:
+    """Keep the first spare subplot for a legend and hide any later unused axes."""
+    flat_axes = list(axes.flat)
+    legend_ax: plt.Axes | None = None
+    if n_used < len(flat_axes):
+        legend_ax = flat_axes[n_used]
+        for ax in flat_axes[n_used + 1 :]:
+            ax.set_visible(False)
+    return flat_axes, legend_ax
+
+
+def _add_faceted_legend(
+    fig: plt.Figure,
+    source_ax: plt.Axes,
+    *,
+    legend_ax: plt.Axes | None,
+    title: str,
+) -> None:
+    """Place a shared legend in a spare subplot when available, else outside."""
+    if legend_ax is not None:
+        handles, labels = source_ax.get_legend_handles_labels()
+        legend_ax.set_axis_off()
+        legend_ax.legend(
+            handles,
+            labels,
+            title=title,
+            loc="center",
+            frameon=True,
+        )
+        return
+
+    _add_figure_legend(
+        fig,
+        source_ax,
+        title=title,
+        bbox_to_anchor=(1.01, 0.5),
+        loc="center left",
+        frameon=True,
+    )
 
 
 def _lineplot_with_errorbars(
@@ -715,9 +766,7 @@ def _fig_honest_benchmark_response(
     if honest.empty:
         return _empty_fig("No sufficiently populated honest-agent benchmark bins found")
 
-    flat_axes = list(axes.flat)
-    for ax in flat_axes[len(models) :]:
-        ax.set_visible(False)
+    _hide_unused_axes(axes, len(models))
 
     visible_axes: list[plt.Axes] = []
     for idx, model in enumerate(models):
@@ -1461,9 +1510,7 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
         squeeze=False,
     )
 
-    flat_axes = list(axes.flat)
-    for ax in flat_axes[len(models) :]:
-        ax.set_visible(False)
+    _, legend_ax = _reserve_legend_axis(axes, len(models))
 
     visible_axes: list[plt.Axes] = []
     for idx, model in enumerate(models):
@@ -1489,13 +1536,11 @@ def fig_liar_influence(data: SweepData) -> plt.Figure:
             ax.get_legend().remove()
         visible_axes.append(ax)
 
-    _add_figure_legend(
+    _add_faceted_legend(
         fig,
         visible_axes[0],
+        legend_ax=legend_ax,
         title="Role",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
     )
     fig.tight_layout()
     return fig
@@ -1543,9 +1588,7 @@ def fig4_alternate(data: SweepData) -> plt.Figure:
         squeeze=False,
     )
 
-    flat_axes = list(axes.flat)
-    for ax in flat_axes[len(models) :]:
-        ax.set_visible(False)
+    _hide_unused_axes(axes, len(models))
 
     visible_axes: list[plt.Axes] = []
     for idx, model in enumerate(models):
@@ -1564,7 +1607,7 @@ def fig4_alternate(data: SweepData) -> plt.Figure:
 
         ax.set_title(model)
         ax.set_xlabel("Liar fraction" if row == n_rows - 1 else "")
-        ax.set_ylabel("Influence gap (Liar - Honest)" if col == 0 else "")
+        ax.set_ylabel("Influence gap" if col == 0 else "")
         ax.axhline(0.0, color="0.25", linestyle="--", linewidth=1, alpha=0.8)
         if ax.get_legend():
             ax.get_legend().remove()
@@ -1836,7 +1879,7 @@ def fig_consensus_entropy(data: SweepData) -> plt.Figure:
     # Row labels embedded in the first-column y-axis label so tight_layout
     # handles spacing automatically (avoids the fragile annotate xy offset).
     for row, threshold in enumerate(thresholds):
-        axes[row, 0].set_ylabel(f"M={threshold}\nHonest-agent consensus rate")
+        axes[row, 0].set_ylabel(f"M={threshold}\nHonest consensus rate")
 
     _add_figure_legend(
         fig,
@@ -1879,9 +1922,7 @@ def fig_coordination_over_rounds(data: SweepData) -> plt.Figure:
         squeeze=False,
     )
 
-    flat_axes = list(axes.flat)
-    for ax in flat_axes[len(models) :]:
-        ax.set_visible(False)
+    _, legend_ax = _reserve_legend_axis(axes, len(models))
 
     visible_axes: list[plt.Axes] = []
     for idx, model in enumerate(models):
@@ -1908,13 +1949,11 @@ def fig_coordination_over_rounds(data: SweepData) -> plt.Figure:
             ax.get_legend().remove()
         visible_axes.append(ax)
 
-    _add_figure_legend(
+    _add_faceted_legend(
         fig,
         visible_axes[0],
+        legend_ax=legend_ax,
         title="Liar fraction",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
     )
     fig.tight_layout()
     return fig
@@ -1950,9 +1989,7 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
         squeeze=False,
     )
 
-    flat_axes = list(axes.flat)
-    for ax in flat_axes[len(models) :]:
-        ax.set_visible(False)
+    _, legend_ax = _reserve_legend_axis(axes, len(models))
 
     visible_axes: list[plt.Axes] = []
     for idx, model in enumerate(models):
@@ -1983,13 +2020,11 @@ def fig_turn_order_effects(data: SweepData) -> plt.Figure:
             ax.get_legend().remove()
         visible_axes.append(ax)
 
-    _add_figure_legend(
+    _add_faceted_legend(
         fig,
         visible_axes[0],
+        legend_ax=legend_ax,
         title="Liar fraction",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
     )
     fig.tight_layout()
     return fig
@@ -2044,9 +2079,7 @@ def fig14_belief_response(data: SweepData) -> plt.Figure:
         squeeze=False,
     )
 
-    flat_axes = list(axes.flat)
-    for ax in flat_axes[len(models) :]:
-        ax.set_visible(False)
+    _, legend_ax = _reserve_legend_axis(axes, len(models))
 
     visible_axes: list[plt.Axes] = []
     for idx, model in enumerate(models):
@@ -2088,13 +2121,11 @@ def fig14_belief_response(data: SweepData) -> plt.Figure:
     if not visible_axes:
         return _empty_fig("No eligible honest-agent benchmark rows found")
 
-    _add_figure_legend(
+    _add_faceted_legend(
         fig,
         visible_axes[0],
+        legend_ax=legend_ax,
         title="Belief rule",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
     )
     fig.tight_layout()
     return fig
@@ -2234,9 +2265,7 @@ def fig15_naive_match_by_turn(data: SweepData) -> plt.Figure:
         squeeze=False,
     )
 
-    flat_axes = list(axes.flat)
-    for ax in flat_axes[len(models) :]:
-        ax.set_visible(False)
+    _, legend_ax = _reserve_legend_axis(axes, len(models))
 
     visible_axes: list[plt.Axes] = []
     for idx, model in enumerate(models):
@@ -2266,13 +2295,11 @@ def fig15_naive_match_by_turn(data: SweepData) -> plt.Figure:
             ax.get_legend().remove()
         visible_axes.append(ax)
 
-    _add_figure_legend(
+    _add_faceted_legend(
         fig,
         visible_axes[0],
+        legend_ax=legend_ax,
         title="Liar fraction",
-        bbox_to_anchor=(1.01, 0.5),
-        loc="center left",
-        frameon=True,
     )
     fig.tight_layout()
     return fig
