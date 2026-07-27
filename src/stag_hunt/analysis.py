@@ -547,6 +547,10 @@ def build_belief_benchmark(data: SweepData) -> pd.DataFrame:
 
     bench["alpha"] = alpha_vals
     bench["q_hat"] = q_hat_vals
+    # Backward-compatible names retained for downstream tables/tests.  The
+    # benchmark is an empirical public-report rate; no alpha decontamination
+    # is applied, so q_corrected is intentionally identical to q_hat.
+    bench["q_corrected"] = bench["q_hat"]
     bench["q_star"] = q_star_vals
     bench["q_margin"] = bench["q_hat"] - bench["q_star"]
     bench["rational_action"] = rational_vals
@@ -554,6 +558,7 @@ def build_belief_benchmark(data: SweepData) -> pd.DataFrame:
     bench["matches_benchmark"] = bench["benchmark_defined"] & (
         bench["original_action"] == bench["rational_action"]
     )
+    bench["matches_bayesian"] = bench["matches_benchmark"]
     bench["false_cooperate"] = (
         bench["benchmark_defined"]
         & (bench["q_margin"] < 0)

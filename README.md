@@ -11,6 +11,8 @@ It includes:
 
 - `src/stag_hunt/sim.py`: run one simulation
 - `src/stag_hunt/sweep_sim.py`: run many simulations over a grid or explicit point set
+- `src/stag_hunt/redux_analysis.py`: mechanism-focused post-hoc analysis that
+  separates pre-flip choices, public actions, and outcomes
 
 ## Setup
 
@@ -180,6 +182,22 @@ Sweep files:
 Global runs index:
 
 - `logs/stag_hunt_runs.csv`
+
+## Generate the Redux Analysis
+
+The redux analysis uses existing CSV logs only and writes to a separate output
+tree, leaving the original analysis untouched:
+
+```bash
+uv run python -m stag_hunt.redux_analysis \
+  --logs-dir logs/all_combination
+```
+
+By default this writes PNG figures, PDF figures, tables, an analysis summary,
+and a reproducibility-appendix draft to `output/all_combination_redux/`. Use
+`--output-dir` to choose a different destination. The suite also includes
+mechanism-corrected replacements for the original model comparison,
+round-dynamics, speaking-position, and belief-response figures.
 
 ## Notes
 
